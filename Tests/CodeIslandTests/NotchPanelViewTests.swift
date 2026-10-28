@@ -1,0 +1,203 @@
+import XCTest
+@testable import CodeIsland
+import CodeIslandCore
+
+final class NotchPanelViewTests: XCTestCase {
+    func testEffectiveNotchWidthAppliesCollapsedWidthScaleOnNonNotchScreens() {
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 50, hasNotch: false),
+            100,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 150, hasNotch: false),
+            300,
+            accuracy: 0.001
+        )
+    }
+
+    func testEffectiveNotchWidthNeverShrinksUnderPhysicalNotch() {
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 50, hasNotch: true),
+            200,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 100, hasNotch: true),
+            200,
+            accuracy: 0.001
+        )
+    }
+
+    func testEffectiveNotchWidthWidensBeyondPhysicalNotch() {
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 150, hasNotch: true),
+            300,
+            accuracy: 0.001
+        )
+    }
+
+    func testEffectiveNotchWidthClampsOutOfRangeScale() {
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 10, hasNotch: false),
+            100,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 250, hasNotch: false),
+            300,
+            accuracy: 0.001
+        )
+    }
+
+    func testCompactToolNameKeepsShortNamesUnchanged() {
+        XCTAssertEqual(ToolNameDisplay.compact("Bash"), "Bash")
+        XCTAssertEqual(ToolNameDisplay.compact("  Read  "), "Read")
+    }
+
+    func testCompactToolNameTruncatesLongNamesWithoutLosingSuffix() {
+        let compact = ToolNameDisplay.compact("mcp__very_long_server_name__fetch_document_page", maxCharacters: 24)
+
+        XCTAssertLessThanOrEqual(compact.count, 24)
+        XCTAssertTrue(compact.hasPrefix("mcp"))
+        XCTAssertTrue(compact.hasSuffix("document_page"))
+        XCTAssertTrue(compact.contains("..."))
+    }
+
+    func testJumpFailureShakeSequenceUsesFastAlternatingOffsets() {
+        XCTAssertEqual(JumpAnimationHelper.shakeSequence, [8, -8, 6, -6, 3, -3, 0])
+    }
+
+    func testEvaluateJumpValidationReturnsSuccessWhenCheckSucceeds() async {
+        var callCount = 0
+        let outcome = await evaluateJumpValidation(
+            delays: [1, 1, 1],
+            isCancelled: { false },
+            sleep: { _ in },
+            checkSucceeded: {
+                callCount += 1
+                return callCount == 2
+            }
+        )
+
+        XCTAssertEqual(outcome, .success)
+    }
+
+    func testEvaluateJumpValidationReturnsFailedWhenAllChecksFail() async {
+        let outcome = await evaluateJumpValidation(
+            delays: [1, 1, 1],
+            isCancelled: { false },
+            sleep: { _ in },
+            checkSucceeded: { false }
+        )
+
+        XCTAssertEqual(outcome, .failed)
+    }
+
+    func testEvaluateJumpValidationReturnsCancelledBeforeCheckRuns() async {
+        var checksRan = 0
+        let outcome = await evaluateJumpValidation(
+            delays: [1, 1, 1],
+            isCancelled: { true },
+            sleep: { _ in },
+            checkSucceeded: {
+                checksRan += 1
+                return false
+            }
+        )
+
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(checksRan, 0)
+    }
+}
+
+// MARK: - Hover phase state machine (PR #208)
+
+final class NotchHoverInteractionTests: XCTestCase {
+    func testQuickPassThroughReversesPrehoverWithoutExpanding() {
+        var phase = NotchHoverInteraction.nextPhase(from: .collapsed, event: .mouseEntered)
+        XCTAssertEqual(phase, .prehover)
+
+        phase = NotchHoverInteraction.nextPhase(from: phase, event: .mouseExited)
+        XCTAssertEqual(phase, .collapsed)
+
+        // The stale expand timer firing after the mouse left must not expand.
+        phase = NotchHoverInteraction.nextPhase(from: phase, event: .expandDelayElapsed)
+        XCTAssertEqual(phase, .collapsed)
+    }
+
+    func testDwellExpandsThenCollapsesAfterLeaveDelay() {
+        var phase = NotchHoverInteraction.nextPhase(from: .collapsed, event: .mouseEntered)
+        phase = NotchHoverInteraction.nextPhase(from: phase, event: .expandDelayElapsed)
+        XCTAssertEqual(phase, .expanded)
+
+        // Leaving alone doesn't collapse an expanded panel — the delay does.
+        phase = NotchHoverInteraction.nextPhase(from: phase, event: .mouseExited)
+        XCTAssertEqual(phase, .expanded)
+
+        phase = NotchHoverInteraction.nextPhase(from: phase, event: .collapseDelayElapsed)
+        XCTAssertEqual(phase, .collapsed)
+    }
+
+    func testCollapseDelayWhileNotExpandedIsANoOp() {
+        XCTAssertEqual(NotchHoverInteraction.nextPhase(from: .collapsed, event: .collapseDelayElapsed), .collapsed)
+        XCTAssertEqual(NotchHoverInteraction.nextPhase(from: .prehover, event: .collapseDelayElapsed), .prehover)
+    }
+
+    func testWidthScaleSliderUsesOnePercentSteps() {
+        XCTAssertEqual(NotchWidthScale.min, 50)
+        XCTAssertEqual(NotchWidthScale.max, 150)
+        XCTAssertEqual(NotchWidthScale.step, 1)
+    }
+
+    func testEffectiveNotchWidthClampsToSharedBounds() {
+        // Physical notch is never scaled.
+        XCTAssertEqual(NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 80, hasNotch: true), 200)
+        // Simulated notch scales and clamps to NotchWidthScale bounds.
+        XCTAssertEqual(NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 75, hasNotch: false), 150)
+        XCTAssertEqual(NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 10, hasNotch: false), 100)
+        XCTAssertEqual(NotchWidthMetrics.effectiveNotchWidth(notchW: 200, collapsedWidthScale: 900, hasNotch: false), 300)
+    }
+
+    // MARK: - Click-to-jump card ownership
+
+    func testApprovalJumpOnlyCollapsesAnApprovalSurface() {
+        XCTAssertTrue(NotchCardKind.approval.matches(.approvalCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.approval.matches(.questionCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.approval.matches(.completionCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.approval.matches(.sessionList))
+        XCTAssertFalse(NotchCardKind.approval.matches(.collapsed))
+    }
+
+    func testQuestionJumpOnlyCollapsesAQuestionSurface() {
+        XCTAssertTrue(NotchCardKind.question.matches(.questionCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.question.matches(.approvalCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.question.matches(.completionCard(sessionId: "s-1")))
+        XCTAssertFalse(NotchCardKind.question.matches(.sessionList))
+        XCTAssertFalse(NotchCardKind.question.matches(.collapsed))
+    }
+
+    /// Jump validation is async: by the time it lands, the panel may already be
+    /// showing the other kind of card. Collapsing then would discard a live
+    /// request the user never touched — the #308 failure mode.
+    func testJumpDoesNotCollapseACardThatReplacedItsOwn() {
+        XCTAssertFalse(NotchCardKind.question.matches(.approvalCard(sessionId: "s-2")))
+        XCTAssertFalse(NotchCardKind.approval.matches(.questionCard(sessionId: "s-2")))
+    }
+
+    func testSessionJumpValidationUsesThreeIncreasingDelays() {
+        XCTAssertEqual(sessionJumpValidationDelays, [120_000_000, 320_000_000, 640_000_000])
+    }
+
+    /// #297 — a question card popping up (or opening under a passing mouse)
+    /// must not pull the caret out of the editor the user is typing in.
+    func testQuestionFieldDoesNotTakeFocusWhileTheUserIsElsewhere() {
+        XCTAssertFalse(NotchCardFocusPolicy.shouldFocusQuestionFieldOnAppear(panelIsKeyWindow: false))
+    }
+
+    /// Once the user has clicked into the island it already holds the keyboard,
+    /// so landing the caret in the answer field only saves them a second click.
+    func testQuestionFieldTakesFocusWhenTheUserIsAlreadyInThePanel() {
+        XCTAssertTrue(NotchCardFocusPolicy.shouldFocusQuestionFieldOnAppear(panelIsKeyWindow: true))
+    }
+}

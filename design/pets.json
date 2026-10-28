@@ -1,0 +1,129 @@
+{
+  "_comment": "Agent pets as 16x16 pixel art with buddy's seven states (anthropics/claude-desktop-buddy, MIT). Legend: . empty, B body, L light, A accent, E eye (2x2 blocks or 1-wide columns), K dark detail, P extra. Agents not listed under sources get no pet: they take no place beside the notch (2026-10-28, the mint fallback Clawd was removed). Generated into Sources/CodeIslandCore/PetSprites.swift by scripts/gen_pet_sprites.py. A species with `face` has no E cells: its eyes are a glyph lit on its screen at (x, y) (PetFrame.screenGlyph; design/v18/v04, after the official Codex pet).",
+  "species": {
+    "clawd": {
+      "name": "Clawd",
+      "eyeBg": "B",
+      "pal": {
+        "B": "#DE886D",
+        "E": "#000000",
+        "K": "#000000"
+      },
+      "grid": [
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "..BBBBBBBBBBBB..",
+        "..BBBBBBBBBBBB..",
+        "..BBEBBBBBBEBB..",
+        "..BBEBBBBBBEBB..",
+        "BBBBBBBBBBBBBBBB",
+        "BBBBBBBBBBBBBBBB",
+        "..BBBBBBBBBBBB..",
+        "..BBBBBBBBBBBB..",
+        "...B.B....B.B...",
+        "...B.B....B.B...",
+        "................"
+      ]
+    },
+    "codex": {
+      "name": "Codex 云朵头",
+      "eyeBg": "S",
+      "pal": {
+        "B": "#5F8FF0",
+        "D": "#4474D8",
+        "S": "#17306E",
+        "E": "#8EE8FF",
+        "K": "#0E1A33"
+      },
+      "face": {
+        "x": 4,
+        "y": 7
+      },
+      "grid": [
+        "................",
+        "................",
+        "................",
+        ".....BBB.BBB....",
+        "..BBBBBBBBBBBB..",
+        ".BBBBBBBBBBBBBB.",
+        "BBBBSSSSSSSSBBBB",
+        "BBBSSSSSSSSSSBBB",
+        ".BBSSSSSSSSSSBB.",
+        "BBBSSSSSSSSSSBBB",
+        ".BBBSSSSSSSSBBB.",
+        "..BBBBBBBBBBBB..",
+        "...BB.BBBB.BB...",
+        "....DD....DD....",
+        "................",
+        "................"
+      ]
+    },
+    "opencode": {
+      "name": "OpenCode 方环",
+      "eyeBg": "L",
+      "pal": {
+        "B": "#F2F2F2",
+        "L": "#1E1E1E",
+        "E": "#FFFFFF",
+        "K": "#FFFFFF"
+      },
+      "grid": [
+        "................",
+        "................",
+        "................",
+        "...BBBBBBBBBB...",
+        "...BBBBBBBBBB...",
+        "...BBLLLLLLBB...",
+        "...BBEELLEEBB...",
+        "...BBEELLEEBB...",
+        "...BBLLLLLLBB...",
+        "...BBLLLLLLBB...",
+        "...BBBBBBBBBB...",
+        "...BBBBBBBBBB...",
+        "....BB....BB....",
+        "....BB....BB....",
+        "................",
+        "................"
+      ]
+    },
+    "antigravity": {
+      "name": "Antigravity 渐变拱门",
+      "eyeBg": "B",
+      "pal": {
+        "B": "#4D80F2",
+        "G": "#9959E6",
+        "H": "#E6668C",
+        "I": "#F2994D",
+        "E": "#0E1230",
+        "K": "#0E1230"
+      },
+      "grid": [
+        "................",
+        "................",
+        "....BBBBBBBB....",
+        "...BBBBBBBBBB...",
+        "..BBBBBBBBBBBB..",
+        "..BBEEBBBBEEBB..",
+        "..BBEEBBBBEEBB..",
+        "..GGGGGGGGGGGG..",
+        "..GGGG....GGGG..",
+        "..HHH......HHH..",
+        "..HHH......HHH..",
+        "..III......III..",
+        "..III......III..",
+        "................",
+        "................",
+        "................"
+      ]
+    }
+  },
+  "sources": {
+    "claude": "clawd",
+    "codex": "codex",
+    "opencode": "opencode",
+    "google-antigravity": "antigravity"
+  }
+}
