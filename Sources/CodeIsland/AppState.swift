@@ -247,7 +247,6 @@ final class AppState {
             }
             if surface == .sessionList || oldValue == .sessionList {
                 denSeenAt = Date()
-                markFinishedConversationsSeen(at: denSeenAt)
             }
             // The den always opens on its front; the back closes with it.
             if surface != .sessionList { denShowsSettings = false }
@@ -280,17 +279,6 @@ final class AppState {
             cancelCompletionQueue()
         }
         denShowsSettings = true
-    }
-
-    /// When the den first showed each conversation after its last turn
-    /// finished; the idle sweep counts from here (`isStaleIdleSession`).
-    var idleSeenAt: [String: Date] = [:]
-
-    private func markFinishedConversationsSeen(at now: Date) {
-        for (sessionId, session) in sessions where session.status == .idle {
-            if let seen = idleSeenAt[sessionId], seen >= session.lastActivity { continue }
-            idleSeenAt[sessionId] = now
-        }
     }
 
     /// The request the approval / question card on screen was opened for.
@@ -472,17 +460,16 @@ final class AppState {
         }
     }
 
-    /// Minutes a finished conversation stays once the den has shown it.
-    nonisolated static let seenIdleGraceMinutes = 3
+    /// Minutes a finished conversation stays in the den.
+    nonisolated static let finishedIdleMinutes = 3
 
-    /// Whether the idle sweep removes an idle card. A finished conversation
-    /// stays until the den has shown it (`idleSeenAt`), then
-    /// `seenIdleGraceMinutes` more: its spark sends you to the den, so its
-    /// row must still be there however long you were away. A card whose
-    /// process exits goes with it (`handleProcessExit`), seen or not.
-    nonisolated static func isStaleIdleSession(lastActivity: Date, seenAt: Date?, now: Date = Date()) -> Bool {
-        guard let seenAt, seenAt >= lastActivity else { return false }
-        return now.timeIntervalSince(seenAt) >= TimeInterval(seenIdleGraceMinutes * 60)
+    /// Whether the idle sweep removes an idle card: a finished conversation
+    /// goes `finishedIdleMinutes` after its last turn, seen or not, and its
+    /// spark goes with it (Jarvis, 2026-10-29: 「做完3分钟就退」; from 10-28
+    /// it had stayed until the den had shown it). A card whose process exits
+    /// goes at once (`handleProcessExit`).
+    nonisolated static func isStaleIdleSession(lastActivity: Date, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(lastActivity) >= TimeInterval(finishedIdleMinutes * 60)
     }
 
     private func cleanupIdleSessions() {
@@ -646,9 +633,9 @@ final class AppState {
             requestCodexDesktopDiscoveryScan()
         }
 
-        // 4. Remove finished conversations the den has shown, a little after.
+        // 4. Remove finished conversations a few minutes after they finish.
         for (key, session) in sessions where session.status == .idle {
-            if Self.isStaleIdleSession(lastActivity: session.lastActivity, seenAt: idleSeenAt[key]) {
+            if Self.isStaleIdleSession(lastActivity: session.lastActivity) {
                 removeSession(key)
             }
         }
@@ -913,7 +900,6 @@ final class AppState {
         stopMonitor(sessionId)
         detachTranscriptTailer(sessionId: sessionId)
         exitingSessions.removeValue(forKey: sessionId)
-        idleSeenAt.removeValue(forKey: sessionId)
         modelReadRetryAt.removeValue(forKey: sessionId)
         subagentModelObservations.removeValue(forKey: sessionId)
         subagentModelReads.removeValue(forKey: sessionId)
@@ -2786,16 +2772,14 @@ final class AppState {
 
     func restoreSessions() {
         let persisted = SessionPersistence.load()
-        let cutoff = Date().addingTimeInterval(-30 * 60) // 30 minutes
         for p in persisted {
             // Restore persisted cliPid only if the process is still alive — avoids
             // stale sessions reappearing briefly after the app or IDE restarts (#46).
             let liveProcess = p.cliPid
                 .flatMap { $0 > 0 ? ProcessIdentity(pid: $0, startTime: p.cliStartTime) : nil }
                 .flatMap { Self.isLiveProcess($0) ? $0 : nil }
-            // A conversation that is still open comes back however long ago it
-            // finished: it stays until the den has shown it.
-            guard p.lastActivity > cutoff || liveProcess != nil else { continue }
+            // Restored cards are idle: one the sweep would take at once stays out.
+            guard !Self.isStaleIdleSession(lastActivity: p.lastActivity) else { continue }
             guard let source = SessionSnapshot.normalizedSupportedSource(p.source) else { continue }
             let restoredSessionId = Self.canonicalRestoredCodexSessionId(
                 sessionId: p.sessionId,
@@ -3254,6 +3238,13 @@ final class AppState {
                     for: existingKey,
                     providerSessionId: info.providerSessionId ?? info.sessionId
                 )
+                continue
+            }
+
+            // A finished conversation the sweep already took (Claude's scan
+            // still finds one written in the last five minutes) stays out
+            // rather than flashing back for a moment.
+            if (info.status ?? .idle) == .idle, Self.isStaleIdleSession(lastActivity: info.modifiedAt) {
                 continue
             }
 
