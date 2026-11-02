@@ -31,10 +31,10 @@ public enum WeeklyQuota {
     public static func claudeRemaining(historyJSON data: Data, now: Date = Date()) -> Double? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let samples = root["samples"] as? [[String: Any]] else { return nil }
-        let latest = samples.max { ($0["t"] as? Double ?? 0) < ($1["t"] as? Double ?? 0) }
+        let latest = samples.max { (number($0["t"]) ?? 0) < (number($1["t"]) ?? 0) }
         guard let latest,
-              let t = latest["t"] as? Double,
-              let used = (latest["u"] as? [String: Any])?["sd"] as? Double else { return nil }
+              let t = number(latest["t"]),
+              let used = number((latest["u"] as? [String: Any])?["sd"]) else { return nil }
         guard now.timeIntervalSince1970 - t / 1000 < 7 * 24 * 3600 else { return nil }
         return clamp(100 - used)
     }
@@ -46,8 +46,8 @@ public enum WeeklyQuota {
     public static func codexRemaining(rateLimitsResult result: [String: Any]) -> Double? {
         guard let limits = result["rateLimits"] as? [String: Any] else { return nil }
         let windows = ["secondary", "primary"].compactMap { limits[$0] as? [String: Any] }
-        let weekly = windows.first { ($0["windowDurationMins"] as? Double) == 10080 } ?? windows.first
-        guard let used = weekly?["usedPercent"] as? Double else { return nil }
+        let weekly = windows.first { number($0["windowDurationMins"]) == 10080 } ?? windows.first
+        guard let used = number(weekly?["usedPercent"]) else { return nil }
         return clamp(100 - used)
     }
 
@@ -79,16 +79,15 @@ public enum WeeklyQuota {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let infos = root["balance_infos"] as? [[String: Any]] else { return nil }
         let info = infos.first { $0["currency"] as? String == "CNY" } ?? infos.first
-        return (info?["total_balance"] as? String).flatMap(Double.init)
-            ?? info?["total_balance"] as? Double
+        return (info?["total_balance"] as? String).flatMap(Double.init) ?? number(info?["total_balance"])
     }
 
     /// `GET openrouter.ai/api/v1/credits`: bought minus used.
     public static func openRouterBalance(_ data: Data) -> Double? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let d = root["data"] as? [String: Any],
-              let total = d["total_credits"] as? Double,
-              let used = d["total_usage"] as? Double else { return nil }
+              let total = number(d["total_credits"]),
+              let used = number(d["total_usage"]) else { return nil }
         return total - used
     }
 
@@ -97,6 +96,16 @@ public enum WeeklyQuota {
         let parts = [deepSeek.map { $0 / deepSeekFull * 100 }, openRouter.map { $0 / openRouterFull * 100 }]
             .compactMap { $0 }
         return parts.min().map(clamp)
+    }
+
+    /// A JSON number, whether it arrived as an integer or not.
+    private static func number(_ value: Any?) -> Double? {
+        switch value {
+        case let v as Double: return v
+        case let v as Int: return Double(v)
+        case let v as NSNumber: return v.doubleValue
+        default: return nil
+        }
     }
 
     private static func clamp(_ v: Double) -> Double { min(100, max(0, v)) }
