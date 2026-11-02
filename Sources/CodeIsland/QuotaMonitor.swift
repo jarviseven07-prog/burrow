@@ -40,7 +40,7 @@ final class QuotaMonitor {
             let groups = await antigravity
             let found: [String: Double?] = [
                 "claude": await claude, "codex": await codexLeft,
-                "google-antigravity": groups.map(\.remaining).min(), "opencode": balances.remaining,
+                "google-antigravity": WeeklyQuota.antigravityBar(groups), "opencode": balances.remaining,
             ]
             await MainActor.run { [weak self] in
                 self?.running = false
@@ -75,7 +75,7 @@ enum QuotaSources {
 
     /// Antigravity's ACP server answers `/usage` itself (no model, no quota
     /// spent). It is the copy agent-bridge installs; without it, no bar.
-    /// Every group's weekly quota; the pet's bar is the tightest.
+    /// Every group's weekly quota; the pet's bar is Argon's.
     static func antigravity() async -> [WeeklyQuota.Group] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser

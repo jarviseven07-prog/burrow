@@ -35,8 +35,9 @@ final class WeeklyQuotaTests: XCTestCase {
         XCTAssertNil(WeeklyQuota.codexRemaining(rateLimitsResult: [:]))
     }
 
-    /// The 11-02 `/usage` reply: the tightest weekly line, never a 5-hour one.
-    func testAntigravityTakesTheTightestWeeklyGroup() {
+    /// The 11-02 `/usage` reply: Argon's weekly line, never a 5-hour one;
+    /// without Argon, the tightest group.
+    func testAntigravityBarFollowsArgon() {
         let text = """
         - **Gemini Models**
           - **Weekly Limit Remaining:** 92% remaining (resets Nov 03, 2026, 09:24 UTC)
@@ -46,7 +47,8 @@ final class WeeklyQuotaTests: XCTestCase {
         - **Gemini 4 Argon**
           - **Gemini 4 Argon Weekly Limit:** 22% remaining (resets Nov 03, 2026, 09:28 UTC)
         """
-        XCTAssertEqual(WeeklyQuota.antigravityRemaining(usageText: text), 17)
+        XCTAssertEqual(WeeklyQuota.antigravityRemaining(usageText: text), 22)
+        XCTAssertEqual(WeeklyQuota.antigravityBar([.init(name: "Gemini Models", remaining: 92), .init(name: "Claude·GPT", remaining: 17)]), 17)
         XCTAssertEqual(WeeklyQuota.antigravityGroups(usageText: text), [
             .init(name: "Gemini Models", remaining: 92),
             .init(name: "Claude·GPT", remaining: 17),

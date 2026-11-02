@@ -384,6 +384,7 @@ struct BurrowQuotaLabel: View {
 /// Antigravity's quota groups on one line under its conversations: each
 /// name in its own colour from the pet's gradient (Jarvis: Gemini Models
 /// green, Argon violet, Claude·GPT pink), its number in the health colour.
+/// The pet's bar on the notch is Argon's alone.
 struct BurrowQuotaGroups: View {
     let groups: [WeeklyQuota.Group]
 

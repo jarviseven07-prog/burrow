@@ -56,9 +56,15 @@ public enum WeeklyQuota {
     /// Antigravity ACP's `/usage` reply (Markdown): every weekly line, e.g.
     /// "- **Weekly Limit Remaining:** 92% remaining (resets …)" or
     /// "- **Gemini 4 Argon Weekly Limit:** 22% remaining". The pet shows
-    /// the tightest group.
+    /// Argon's.
     public static func antigravityRemaining(usageText text: String) -> Double? {
-        antigravityGroups(usageText: text).map(\.remaining).min()
+        antigravityBar(antigravityGroups(usageText: text))
+    }
+
+    /// The pet's bar on the notch follows Argon (Jarvis, 11-02); without an
+    /// Argon group, the tightest one.
+    public static func antigravityBar(_ groups: [Group]) -> Double? {
+        groups.first { $0.name == "Argon" }?.remaining ?? groups.map(\.remaining).min()
     }
 
     /// One of Antigravity's quota groups, as the den lists it.
