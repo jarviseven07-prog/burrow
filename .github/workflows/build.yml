@@ -1,0 +1,20 @@
+# Builds Burrow on a GitHub Mac (with Xcode) and keeps the app for a week.
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: xcodebuild -version && swift --version
+      - run: swift test --filter WeeklyQuotaTests
+      - run: ./build.sh
+      - run: ditto -c -k --keepParent .build/release/Burrow.app Burrow.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Burrow
+          path: Burrow.zip
+          retention-days: 7

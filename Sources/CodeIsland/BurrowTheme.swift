@@ -31,6 +31,8 @@ enum Burrow {
     static let spark = Color(red: 1.0, green: 0.953, blue: 0.863)          // #FFF3DC
     /// Something is working.
     static let moss = Color(red: 0.561, green: 0.812, blue: 0.537)         // #8FCF89
+    /// A health bar running short (under 30% left): the orange of Antigravity's feet.
+    static let quotaShort = Color(red: 0.949, green: 0.600, blue: 0.302)  // #F2994D
 
     // MARK: Type (SF Pro Rounded — the native cousin of the prototype's Nunito)
 

@@ -262,6 +262,8 @@ final class AppState {
     /// its ember beside the notch (BurrowEmber), one that finished its spark
     /// (BurrowSpark).
     var denSeenAt: Date = .distantPast
+    /// Weekly quota left per agent, 0–100 (QuotaMonitor); no entry, no bar.
+    var quotaRemaining: [String: Double] = [:]
     /// `denSeenAt` as it was when the open den was opened: its rows mark the
     /// turns that finished since then.
     var denLookBefore: Date = .distantPast
