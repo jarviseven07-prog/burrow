@@ -58,13 +58,43 @@ public enum WeeklyQuota {
     /// "- **Gemini 4 Argon Weekly Limit:** 22% remaining". The pet shows
     /// the tightest group.
     public static func antigravityRemaining(usageText text: String) -> Double? {
-        var tightest: Double?
-        for line in text.split(separator: "\n") where line.range(of: "weekly", options: .caseInsensitive) != nil {
-            guard let match = line.range(of: #"(\d+(?:\.\d+)?)%\s*remaining"#, options: .regularExpression),
-                  let number = Double(line[match].prefix { $0.isNumber || $0 == "." }) else { continue }
-            tightest = min(tightest ?? number, number)
+        antigravityGroups(usageText: text).map(\.remaining).min()
+    }
+
+    /// One of Antigravity's quota groups, as the den lists it.
+    public struct Group: Equatable, Sendable {
+        /// "Gemini Models", "Argon", "Claude·GPT"; another group keeps its own name.
+        public let name: String
+        public let remaining: Double
+        public init(name: String, remaining: Double) {
+            self.name = name
+            self.remaining = remaining
         }
-        return tightest.map(clamp)
+    }
+
+    /// Each group's weekly line under its "- **Group**" heading, in the
+    /// reply's order.
+    public static func antigravityGroups(usageText text: String) -> [Group] {
+        var groups: [Group] = []
+        var heading = ""
+        for line in text.split(separator: "\n") {
+            if let match = line.range(of: #"^- \*\*([^*:]+)\*\*\s*$"#, options: .regularExpression) {
+                heading = String(line[match]).trimmingCharacters(in: CharacterSet(charactersIn: "-* "))
+                continue
+            }
+            guard line.range(of: "weekly", options: .caseInsensitive) != nil,
+                  let match = line.range(of: #"(\d+(?:\.\d+)?)%\s*remaining"#, options: .regularExpression),
+                  let number = Double(line[match].prefix { $0.isNumber || $0 == "." }) else { continue }
+            groups.append(Group(name: shortGroupName(heading), remaining: clamp(number)))
+        }
+        return groups
+    }
+
+    static func shortGroupName(_ heading: String) -> String {
+        let lower = heading.lowercased()
+        if lower.contains("argon") { return "Argon" }
+        if lower.contains("claude") || lower.contains("gpt") { return "Claude·GPT" }
+        return heading.isEmpty ? "Antigravity" : heading
     }
 
     // MARK: OpenCode balances

@@ -251,8 +251,10 @@ struct BurrowDen: View {
                 }
                 // The den never grows taller than five of the old two-line rows.
                 let cap = CGFloat(maxVisibleSessions) * 54
-                let quotas = groups.map { pets[BurrowResidents.heroId(agent: $0.agent)]?.quota != nil }
-                if BurrowDenMetrics.height(rows: groups.map(\.ids.count), quota: quotas) > cap {
+                let shown = groups.map { pets[BurrowResidents.heroId(agent: $0.agent)] }
+                if BurrowDenMetrics.height(rows: groups.map(\.ids.count),
+                                           quota: shown.map { $0?.quota != nil && $0?.quotaGroups.isEmpty != false },
+                                           groups: shown.map { $0?.quotaGroups.isEmpty == false }) > cap {
                     ScrollView(.vertical) { blocks }
                         .frame(height: cap)
                         .scrollIndicators(.never)
@@ -296,15 +298,22 @@ enum BurrowDenMetrics {
     /// The quota line under the name plate (BurrowQuotaLabel).
     static let quotaLine: CGFloat = 13
 
-    static func blockHeight(rows: Int, quota: Bool = false) -> CGFloat {
-        max(CGFloat(rows) * rowHeight, petBlockHeight + (quota ? quotaLine : 0)) + 2 * blockPadding
+    /// Antigravity's groups, one line under its conversations (BurrowQuotaGroups).
+    static let groupsLine: CGFloat = 18
+
+    static func blockHeight(rows: Int, quota: Bool = false, groups: Bool = false) -> CGFloat {
+        max(CGFloat(rows) * rowHeight + (groups ? groupsLine : 0), petBlockHeight + (quota ? quotaLine : 0))
+            + 2 * blockPadding
     }
 
     /// All the blocks for agents with these many conversations each, and
-    /// whether each shows its quota.
-    static func height(rows: [Int], quota: [Bool] = []) -> CGFloat {
-        rows.indices.map { blockHeight(rows: rows[$0], quota: quota.indices.contains($0) && quota[$0]) }
-            .reduce(0, +) + CGFloat(max(0, rows.count - 1)) * blockSpacing
+    /// whether each shows its quota under its name or its groups' line.
+    static func height(rows: [Int], quota: [Bool] = [], groups: [Bool] = []) -> CGFloat {
+        rows.indices.map {
+            blockHeight(rows: rows[$0], quota: quota.indices.contains($0) && quota[$0],
+                        groups: groups.indices.contains($0) && groups[$0])
+        }
+        .reduce(0, +) + CGFloat(max(0, rows.count - 1)) * blockSpacing
     }
 }
 
@@ -328,7 +337,7 @@ struct BurrowAgentBlock: View {
                 if let session = ids.first.flatMap({ appState.sessions[$0] }) {
                     BurrowAgentName(source: session.mascotSource, label: session.sourceLabel)
                 }
-                if let quota = pet?.quota {
+                if let quota = pet?.quota, pet?.quotaGroups.isEmpty != false {
                     BurrowQuotaLabel(remaining: quota, label: pet?.quotaLabel)
                 }
             }
@@ -340,10 +349,16 @@ struct BurrowAgentBlock: View {
                         BurrowSessionRow(appState: appState, session: session, sessionId: sid)
                     }
                 }
+                if let groups = pet?.quotaGroups, !groups.isEmpty {
+                    BurrowQuotaGroups(groups: groups)
+                }
             }
         }
         .padding(.vertical, BurrowDenMetrics.blockPadding)
-        .frame(minHeight: BurrowDenMetrics.blockHeight(rows: ids.count, quota: pet?.quota != nil), alignment: .top)
+        .frame(minHeight: BurrowDenMetrics.blockHeight(rows: ids.count,
+                                                        quota: pet?.quota != nil && pet?.quotaGroups.isEmpty != false,
+                                                        groups: pet?.quotaGroups.isEmpty == false),
+               alignment: .top)
     }
 }
 
@@ -363,6 +378,43 @@ struct BurrowQuotaLabel: View {
             .padding(.horizontal, 2)
             .frame(height: BurrowDenMetrics.quotaLine)
             .help(L10n.shared["burrow_quota_help"])
+    }
+}
+
+/// Antigravity's quota groups on one line under its conversations: each
+/// name in its own colour from the pet's gradient (Jarvis: Gemini Models
+/// green, Argon violet, Claude·GPT pink), its number in the health colour.
+struct BurrowQuotaGroups: View {
+    let groups: [WeeklyQuota.Group]
+
+    static let order = ["Gemini Models", "Argon", "Claude·GPT"]
+
+    static func color(_ name: String) -> Color {
+        switch name {
+        case "Gemini Models": Burrow.moss
+        case "Argon": Color(red: 0.600, green: 0.349, blue: 0.902)       // #9959E6
+        case "Claude·GPT": Color(red: 0.902, green: 0.400, blue: 0.549)  // #E6668C
+        default: Burrow.dim
+        }
+    }
+
+    var body: some View {
+        let sorted = groups.sorted { (Self.order.firstIndex(of: $0.name) ?? 9) < (Self.order.firstIndex(of: $1.name) ?? 9) }
+        HStack(spacing: 12) {
+            ForEach(sorted, id: \.name) { group in
+                HStack(spacing: 4) {
+                    Text(group.name).foregroundStyle(Self.color(group.name))
+                    Text("\(Int(group.remaining.rounded()))%").foregroundStyle(BurrowHealthBar.color(group.remaining))
+                }
+            }
+        }
+        .font(Burrow.font(11, .heavy))
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .frame(maxWidth: .infinity, minHeight: BurrowDenMetrics.groupsLine, alignment: .leading)
+        .padding(.leading, 18)
+        .help(L10n.shared["burrow_quota_help"])
     }
 }
 

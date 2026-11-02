@@ -267,6 +267,8 @@ final class AppState {
     /// What the den writes under a pet instead of its percentage (OpenCode's
     /// balances, "¥71 · $17").
     var quotaLabel: [String: String] = [:]
+    /// An agent with several quotas (Antigravity): each one, for the den.
+    var quotaGroups: [String: [WeeklyQuota.Group]] = [:]
     /// `denSeenAt` as it was when the open den was opened: its rows mark the
     /// turns that finished since then.
     var denLookBefore: Date = .distantPast

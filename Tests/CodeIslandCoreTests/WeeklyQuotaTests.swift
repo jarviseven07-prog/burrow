@@ -47,6 +47,11 @@ final class WeeklyQuotaTests: XCTestCase {
           - **Gemini 4 Argon Weekly Limit:** 22% remaining (resets Nov 03, 2026, 09:28 UTC)
         """
         XCTAssertEqual(WeeklyQuota.antigravityRemaining(usageText: text), 17)
+        XCTAssertEqual(WeeklyQuota.antigravityGroups(usageText: text), [
+            .init(name: "Gemini Models", remaining: 92),
+            .init(name: "Claude·GPT", remaining: 17),
+            .init(name: "Argon", remaining: 22),
+        ])
         XCTAssertNil(WeeklyQuota.antigravityRemaining(usageText: "data not available yet"))
     }
 

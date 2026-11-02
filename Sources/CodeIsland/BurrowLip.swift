@@ -184,6 +184,8 @@ struct BurrowPeekPet: Identifiable, Equatable {
     var quota: Double? = nil
     /// What the den writes for it instead of "96%" (OpenCode's balances).
     var quotaLabel: String? = nil
+    /// Antigravity's groups, listed in the den under its conversations.
+    var quotaGroups: [WeeklyQuota.Group] = []
 }
 
 /// Who is in the burrow right now: one pet per agent.
@@ -258,7 +260,8 @@ enum BurrowResidents {
                     BurrowSpark.isUnseen($0.1, doneAt: appState.turnDoneAt[$0.0], seenAt: appState.denSeenAt)
                 },
                 quota: appState.quotaRemaining[group.agent],
-                quotaLabel: appState.quotaLabel[group.agent]
+                quotaLabel: appState.quotaLabel[group.agent],
+                quotaGroups: appState.quotaGroups[group.agent] ?? []
             )
         }
     }

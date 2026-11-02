@@ -37,14 +37,16 @@ final class QuotaMonitor {
             async let antigravity = QuotaSources.antigravity()
             async let openCode = QuotaSources.openCode()
             let balances = await openCode
+            let groups = await antigravity
             let found: [String: Double?] = [
                 "claude": await claude, "codex": await codexLeft,
-                "google-antigravity": await antigravity, "opencode": balances.remaining,
+                "google-antigravity": groups.map(\.remaining).min(), "opencode": balances.remaining,
             ]
             await MainActor.run { [weak self] in
                 self?.running = false
                 self?.appState?.quotaRemaining = found.compactMapValues { $0 }
                 self?.appState?.quotaLabel = balances.label.map { ["opencode": $0] } ?? [:]
+                self?.appState?.quotaGroups = groups.isEmpty ? [:] : ["google-antigravity": groups]
             }
         }
     }
@@ -73,20 +75,21 @@ enum QuotaSources {
 
     /// Antigravity's ACP server answers `/usage` itself (no model, no quota
     /// spent). It is the copy agent-bridge installs; without it, no bar.
-    static func antigravity() async -> Double? {
+    /// Every group's weekly quota; the pet's bar is the tightest.
+    static func antigravity() async -> [WeeklyQuota.Group] {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         let root = home.appendingPathComponent(".local/share/agent-bridge/antigravity-acp")
-        guard let versions = try? fm.contentsOfDirectory(atPath: root.path) else { return nil }
+        guard let versions = try? fm.contentsOfDirectory(atPath: root.path) else { return [] }
         let newest = versions.sorted { $0.compare($1, options: .numeric) == .orderedAscending }.last { v in
             fm.isExecutableFile(atPath: root.appendingPathComponent("\(v)/agy_acp_server.par").path)
         }
-        guard let newest else { return nil }
+        guard let newest else { return [] }
         // An empty folder to start the session in, so it reads no project.
         let cwd = home.appendingPathComponent(".codeisland/acp-cwd")
         try? fm.createDirectory(at: cwd, withIntermediateDirectories: true)
         guard let rpc = LineRPC(executable: root.appendingPathComponent("\(newest)/agy_acp_server.par"),
-                                args: [], env: proxyEnvironment(), timeout: 60) else { return nil }
+                                args: [], env: proxyEnvironment(), timeout: 60) else { return [] }
         defer { rpc.close() }
         let client: [String: Any] = [
             "protocolVersion": 1,
@@ -95,7 +98,7 @@ enum QuotaSources {
         ]
         guard rpc.request("initialize", client) != nil,
               let session = rpc.request("session/new", ["cwd": cwd.path, "mcpServers": [Any]()])?["sessionId"] as? String
-        else { return nil }
+        else { return [] }
         var text = ""
         _ = rpc.request("session/prompt", ["sessionId": session, "prompt": [["type": "text", "text": "/usage"]]]) { note in
             guard let update = (note["params"] as? [String: Any])?["update"] as? [String: Any],
@@ -103,7 +106,7 @@ enum QuotaSources {
                   let chunk = (update["content"] as? [String: Any])?["text"] as? String else { return }
             text += chunk
         }
-        return WeeklyQuota.antigravityRemaining(usageText: text)
+        return WeeklyQuota.antigravityGroups(usageText: text)
     }
 
     /// The system proxy, which the ACP server (unlike URLSession) does not
