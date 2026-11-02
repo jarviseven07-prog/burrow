@@ -548,10 +548,7 @@ final class AppState {
         let monitoredThinkingTimeout: TimeInterval = 300
         let nativeAppThinkingTimeout: TimeInterval = 30
         let codexTerminalTurnSettleTime: TimeInterval = 3
-        for (key, session) in sessions
-            where session.status == .processing
-            && session.currentTool == nil
-            && session.toolDescription == nil {
+        for (key, session) in sessions where Self.sweepsSilentThinking(session) {
             let elapsed = -session.lastActivity.timeIntervalSinceNow
             guard processMonitors[key] != nil else { continue }
             // Claude — CLI or a Claude Desktop Code session, which counts as a
@@ -1458,6 +1455,37 @@ final class AppState {
         return agent == "claude"
     }
 
+    /// Claude Code compacts a finished conversation on its own, about 55
+    /// minutes after its last turn: PreCompact(auto), then the compacting
+    /// agent's SubagentStop, and no PostCompact or SessionStart after them.
+    /// That is not the conversation working. Before this (Jarvis, 11-03) the
+    /// PreCompact put "Compacting context…" on an idle row, which the
+    /// silent-thinking sweep skipped, so five finished chats sat on
+    /// "thinking" for hours. A manual /compact, or one inside a turn, still shows.
+    nonisolated static func isIdleClaudeCompaction(normalizedEventName: String, rawJSON: [String: Any],
+                                                   session: SessionSnapshot?) -> Bool {
+        let agent = SessionSnapshot.normalizedSupportedSource(rawJSON["_source"] as? String) ?? "claude"
+        guard agent == "claude" else { return false }
+        switch normalizedEventName {
+        case "PreCompact":
+            return rawJSON["trigger"] as? String == "auto" && (session == nil || session?.status == .idle)
+        case "SubagentStop":
+            // An idle row Burrow shows already ignores it
+            // (keepBackgroundClaudeAgentQuiet); one it doesn't show stays out.
+            return session == nil
+        default:
+            return false
+        }
+    }
+
+    /// The rows the silent-thinking sweep judges: thinking, no tool running.
+    /// A Claude row is judged by its transcript even with a note on it —
+    /// PreCompact leaves "Compacting context…" there.
+    nonisolated static func sweepsSilentThinking(_ session: SessionSnapshot) -> Bool {
+        session.status == .processing && session.currentTool == nil
+            && (session.toolDescription == nil || session.isClaude)
+    }
+
     func handleEvent(_ event: HookEvent) {
         // Skip events from subagent worktrees — tracked via parent's SubagentStart/Stop
         if let cwd = event.rawJSON["cwd"] as? String,
@@ -1518,7 +1546,9 @@ final class AppState {
         // with --resume, which says SessionStart(resume) and nothing else.
         // That is you looking, not the agent working: it brings no row back.
         if Self.isResumeWithoutWork(normalizedEventName: normalizedEventName, rawJSON: event.rawJSON,
-                                    tracked: sessions[sessionId] != nil) {
+                                    tracked: sessions[sessionId] != nil)
+            || Self.isIdleClaudeCompaction(normalizedEventName: normalizedEventName, rawJSON: event.rawJSON,
+                                           session: sessions[sessionId]) {
             return
         }
 
