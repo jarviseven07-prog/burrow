@@ -36,13 +36,15 @@ final class QuotaMonitor {
             async let codexLeft = QuotaSources.codex(executable: codex)
             async let antigravity = QuotaSources.antigravity()
             async let openCode = QuotaSources.openCode()
+            let balances = await openCode
             let found: [String: Double?] = [
                 "claude": await claude, "codex": await codexLeft,
-                "google-antigravity": await antigravity, "opencode": await openCode,
+                "google-antigravity": await antigravity, "opencode": balances.remaining,
             ]
             await MainActor.run { [weak self] in
                 self?.running = false
                 self?.appState?.quotaRemaining = found.compactMapValues { $0 }
+                self?.appState?.quotaLabel = balances.label.map { ["opencode": $0] } ?? [:]
             }
         }
     }
@@ -119,17 +121,20 @@ enum QuotaSources {
         return env
     }
 
-    /// OpenCode's two balances, with the keys OpenCode keeps.
-    static func openCode() async -> Double? {
+    /// OpenCode's two balances, with the keys OpenCode keeps: the bar's
+    /// percentage and the amounts for the den.
+    static func openCode() async -> (remaining: Double?, label: String?) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/opencode/auth.json")
         guard let data = try? Data(contentsOf: url),
-              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return (nil, nil) }
         let dsKey = (auth["deepseek"] as? [String: Any])?["key"] as? String
         let orKey = (auth["openrouter"] as? [String: Any])?["key"] as? String
         async let ds = balance("https://api.deepseek.com/user/balance", key: dsKey, parse: WeeklyQuota.deepSeekBalance)
         async let or = balance("https://openrouter.ai/api/v1/credits", key: orKey, parse: WeeklyQuota.openRouterBalance)
-        return WeeklyQuota.openCodeRemaining(deepSeek: await ds, openRouter: await or)
+        let (d, o) = await (ds, or)
+        return (WeeklyQuota.openCodeRemaining(deepSeek: d, openRouter: o),
+                WeeklyQuota.balanceLabel(deepSeek: d, openRouter: o))
     }
 
     private static func balance(_ endpoint: String, key: String?, parse: (Data) -> Double?) async -> Double? {

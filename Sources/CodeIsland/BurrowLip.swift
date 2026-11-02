@@ -182,6 +182,8 @@ struct BurrowPeekPet: Identifiable, Equatable {
     var doneUnseen = false
     /// Weekly quota left, 0–100: a health bar under the pet. Nil, no bar.
     var quota: Double? = nil
+    /// What the den writes for it instead of "96%" (OpenCode's balances).
+    var quotaLabel: String? = nil
 }
 
 /// Who is in the burrow right now: one pet per agent.
@@ -255,7 +257,8 @@ enum BurrowResidents {
                 doneUnseen: sessions.contains {
                     BurrowSpark.isUnseen($0.1, doneAt: appState.turnDoneAt[$0.0], seenAt: appState.denSeenAt)
                 },
-                quota: appState.quotaRemaining[group.agent]
+                quota: appState.quotaRemaining[group.agent],
+                quotaLabel: appState.quotaLabel[group.agent]
             )
         }
     }
@@ -574,17 +577,20 @@ struct BurrowHealthBar: View {
     var body: some View {
         let cell = Burrow.petCell
         let lit = WeeklyQuota.litCells(remaining, of: Self.cells)
-        let color: Color = switch WeeklyQuota.health(remaining) {
-        case .good: Burrow.moss
-        case .short: Burrow.quotaShort
-        case .critical: Burrow.ember
-        }
         HStack(spacing: 0) {
-            Rectangle().fill(color).frame(width: CGFloat(lit) * cell)
+            Rectangle().fill(Self.color(remaining)).frame(width: CGFloat(lit) * cell)
             Rectangle().fill(Burrow.ink.opacity(0.28))
         }
         .frame(width: CGFloat(Self.cells) * cell, height: CGFloat(Self.rows) * cell)
         .accessibilityHidden(true)
+    }
+
+    static func color(_ remaining: Double) -> Color {
+        switch WeeklyQuota.health(remaining) {
+        case .good: Burrow.moss
+        case .short: Burrow.quotaShort
+        case .critical: Burrow.ember
+        }
     }
 }
 

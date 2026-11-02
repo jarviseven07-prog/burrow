@@ -91,6 +91,13 @@ public enum WeeklyQuota {
         return total - used
     }
 
+    /// OpenCode's two balances as the den shows them: "¥71 · $17".
+    public static func balanceLabel(deepSeek: Double?, openRouter: Double?) -> String? {
+        let parts = [deepSeek.map { "¥\(Int($0.rounded()))" }, openRouter.map { "$\(Int($0.rounded()))" }]
+            .compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     /// OpenCode's bar: the tighter of its two balances against its full.
     public static func openCodeRemaining(deepSeek: Double?, openRouter: Double?) -> Double? {
         let parts = [deepSeek.map { $0 / deepSeekFull * 100 }, openRouter.map { $0 / openRouterFull * 100 }]

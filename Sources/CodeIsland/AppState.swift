@@ -264,6 +264,9 @@ final class AppState {
     var denSeenAt: Date = .distantPast
     /// Weekly quota left per agent, 0–100 (QuotaMonitor); no entry, no bar.
     var quotaRemaining: [String: Double] = [:]
+    /// What the den writes under a pet instead of its percentage (OpenCode's
+    /// balances, "¥71 · $17").
+    var quotaLabel: [String: String] = [:]
     /// `denSeenAt` as it was when the open den was opened: its rows mark the
     /// turns that finished since then.
     var denLookBefore: Date = .distantPast

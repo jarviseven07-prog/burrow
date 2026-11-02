@@ -58,5 +58,8 @@ final class WeeklyQuotaTests: XCTestCase {
         XCTAssertEqual(WeeklyQuota.openCodeRemaining(deepSeek: 76.75, openRouter: 16.97)!, 76.75, accuracy: 0.001)
         XCTAssertEqual(WeeklyQuota.openCodeRemaining(deepSeek: nil, openRouter: 3)!, 15, accuracy: 0.001)
         XCTAssertNil(WeeklyQuota.openCodeRemaining(deepSeek: nil, openRouter: nil))
+        XCTAssertEqual(WeeklyQuota.balanceLabel(deepSeek: 71.27, openRouter: 16.96), "¥71 · $17")
+        XCTAssertEqual(WeeklyQuota.balanceLabel(deepSeek: nil, openRouter: 3.2), "$3")
+        XCTAssertNil(WeeklyQuota.balanceLabel(deepSeek: nil, openRouter: nil))
     }
 }
