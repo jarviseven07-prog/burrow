@@ -400,20 +400,22 @@ struct BurrowQuotaGroups: View {
 
     var body: some View {
         let sorted = groups.sorted { (Self.order.firstIndex(of: $0.name) ?? 9) < (Self.order.firstIndex(of: $1.name) ?? 9) }
-        HStack(spacing: 12) {
-            ForEach(sorted, id: \.name) { group in
-                HStack(spacing: 4) {
-                    Text(group.name).foregroundStyle(Self.color(group.name))
-                    Text("\(Int(group.remaining.rounded()))%").foregroundStyle(BurrowHealthBar.color(group.remaining))
-                }
-            }
+        // One Text, so a squeeze shrinks every group alike.
+        sorted.enumerated().reduce(Text("")) { line, item in
+            let (i, group) = item
+            return line
+                + Text(i == 0 ? "" : "   ")
+                + Text(group.name).foregroundColor(Self.color(group.name))
+                + Text(" \(Int(group.remaining.rounded()))%").foregroundColor(BurrowHealthBar.color(group.remaining))
         }
         .font(Burrow.font(11, .heavy))
         .monospacedDigit()
         .lineLimit(1)
         .minimumScaleFactor(0.8)
         .frame(maxWidth: .infinity, minHeight: BurrowDenMetrics.groupsLine, alignment: .leading)
-        .padding(.leading, 18)
+        // Under the conversations' titles, past their signs.
+        .padding(.leading, 23)
+        .padding(.trailing, 8)
         .help(L10n.shared["burrow_quota_help"])
     }
 }
