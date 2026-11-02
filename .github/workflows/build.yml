@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -version && swift --version
-      - run: swift test --filter WeeklyQuotaTests
+      - run: swift test --filter "WeeklyQuotaTests|BurrowFinishedIdleTests"
       - run: ./build.sh
       - run: ditto -c -k --keepParent .build/release/Burrow.app Burrow.zip
       - uses: actions/upload-artifact@v4

@@ -42,4 +42,24 @@ final class BurrowFinishedIdleTests: XCTestCase {
         XCTAssertNotNil(app.sessions["fresh"])
         XCTAssertNil(app.sessions["taken"], "Claude's scan finds transcripts written in the last five minutes; the sweep took this one")
     }
+
+    /// Only opening an old conversation (SessionStart, source "resume") does
+    /// not bring its row back; a prompt does, and so does anything for a row
+    /// already shown or another agent.
+    func testReopeningAnOldClaudeConversationBringsNoRow() {
+        let resume: [String: Any] = ["_source": "claude", "source": "resume"]
+        XCTAssertTrue(AppState.isResumeWithoutWork(normalizedEventName: "SessionStart", rawJSON: resume, tracked: false))
+        XCTAssertFalse(AppState.isResumeWithoutWork(normalizedEventName: "SessionStart", rawJSON: resume, tracked: true))
+        XCTAssertFalse(AppState.isResumeWithoutWork(normalizedEventName: "UserPromptSubmit", rawJSON: resume, tracked: false))
+        XCTAssertFalse(AppState.isResumeWithoutWork(normalizedEventName: "SessionStart",
+                                                    rawJSON: ["_source": "claude", "source": "startup"], tracked: false))
+        XCTAssertFalse(AppState.isResumeWithoutWork(normalizedEventName: "SessionStart",
+                                                    rawJSON: ["_source": "codex", "source": "resume"], tracked: false))
+
+        let app = AppState()
+        app.handleEvent(HookEvent(from: Data(#"{"hook_event_name":"SessionStart","session_id":"old-chat","source":"resume","_source":"claude","cwd":"/tmp"}"#.utf8))!)
+        XCTAssertNil(app.sessions["old-chat"])
+        app.handleEvent(HookEvent(from: Data(#"{"hook_event_name":"UserPromptSubmit","session_id":"old-chat","prompt":"继续","_source":"claude","cwd":"/tmp"}"#.utf8))!)
+        XCTAssertNotNil(app.sessions["old-chat"])
+    }
 }

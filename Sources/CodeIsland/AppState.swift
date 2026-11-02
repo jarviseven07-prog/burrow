@@ -1446,6 +1446,18 @@ final class AppState {
         }
     }
 
+    /// A Claude conversation resumed (Claude Desktop reopening it, or
+    /// `claude --resume`) that Burrow is not showing: ignored until a prompt
+    /// or a tool says it is working again (Jarvis, 11-02: an old chat sat at
+    /// the top of the den for three minutes after he only opened it).
+    nonisolated static func isResumeWithoutWork(normalizedEventName: String, rawJSON: [String: Any],
+                                                tracked: Bool) -> Bool {
+        guard !tracked, normalizedEventName == "SessionStart",
+              rawJSON["source"] as? String == "resume" else { return false }
+        let agent = SessionSnapshot.normalizedSupportedSource(rawJSON["_source"] as? String) ?? "claude"
+        return agent == "claude"
+    }
+
     func handleEvent(_ event: HookEvent) {
         // Skip events from subagent worktrees — tracked via parent's SubagentStart/Stop
         if let cwd = event.rawJSON["cwd"] as? String,
@@ -1499,6 +1511,14 @@ final class AppState {
         if (event.rawJSON["_source"] as? String) == "codex"
             && sessions[sessionId] == nil
             && event.rawJSON["transcript_path"] is NSNull {
+            return
+        }
+
+        // Opening an old conversation in Claude Desktop restarts its `claude`
+        // with --resume, which says SessionStart(resume) and nothing else.
+        // That is you looking, not the agent working: it brings no row back.
+        if Self.isResumeWithoutWork(normalizedEventName: normalizedEventName, rawJSON: event.rawJSON,
+                                    tracked: sessions[sessionId] != nil) {
             return
         }
 
