@@ -56,25 +56,23 @@ final class BurrowLipMetricsTests: XCTestCase {
     }
 
     /// Every craft, the firefly over its head and the periscope included,
-    /// is drawn inside a notch's band, raised for health bars or not. (On a
-    /// menu bar without a notch, 24–25pt, the tallest ones lose their top
-    /// pixels, as the sleeping z's and the "!" always have.)
+    /// is drawn inside a notch's band. (On a menu bar without a notch,
+    /// 24–25pt, the tallest ones lose their top pixels, as the sleeping z's
+    /// and the "!" always have.)
     func testCraftsSitInsideANotchsBand() {
         for band: CGFloat in [32, 37, 38] {
-            for raised in [false, true] {
-                for species in PetSpecies.allCases {
-                    let rows = PeekRows(species.sprite)
-                    // PixelPetView: the 28.5pt canvas is centred on the 24pt
-                    // frame and raised 1.5 cells.
-                    let canvasTop = BurrowLipMetrics.earOffset(rows: rows, bandHeight: band, raised: raised)
-                        + (Burrow.petSize - CGFloat(PetFrame.canvasHeight) * Burrow.petCell) / 2 - 1.5 * Burrow.petCell
-                    for work in PetWork.allCases {
-                        let highest = (0..<96).flatMap { i in
-                            PetFrame.pixels(sprite: species.sprite, state: .busy, t: Double(i) * 0.05, work: work).map(\.y)
-                        }.min() ?? 0
-                        XCTAssertGreaterThanOrEqual(canvasTop + CGFloat(highest) * Burrow.petCell, 0,
-                                                    "\(species) \(work) in \(band)pt: cut off at the top")
-                    }
+            for species in PetSpecies.allCases {
+                let rows = PeekRows(species.sprite)
+                // PixelPetView: the 28.5pt canvas is centred on the 24pt
+                // frame and raised 1.5 cells.
+                let canvasTop = BurrowLipMetrics.earOffset(rows: rows, bandHeight: band)
+                    + (Burrow.petSize - CGFloat(PetFrame.canvasHeight) * Burrow.petCell) / 2 - 1.5 * Burrow.petCell
+                for work in PetWork.allCases {
+                    let highest = (0..<96).flatMap { i in
+                        PetFrame.pixels(sprite: species.sprite, state: .busy, t: Double(i) * 0.05, work: work).map(\.y)
+                    }.min() ?? 0
+                    XCTAssertGreaterThanOrEqual(canvasTop + CGFloat(highest) * Burrow.petCell, 0,
+                                                "\(species) \(work) in \(band)pt: cut off at the top")
                 }
             }
         }

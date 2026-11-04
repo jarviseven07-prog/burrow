@@ -251,10 +251,7 @@ struct BurrowDen: View {
                 }
                 // The den never grows taller than five of the old two-line rows.
                 let cap = CGFloat(maxVisibleSessions) * 54
-                let shown = groups.map { pets[BurrowResidents.heroId(agent: $0.agent)] }
-                if BurrowDenMetrics.height(rows: groups.map(\.ids.count),
-                                           quota: shown.map { $0?.quota != nil && $0?.quotaGroups.isEmpty != false },
-                                           groups: shown.map { $0?.quotaGroups.isEmpty == false }) > cap {
+                if BurrowDenMetrics.height(rows: groups.map(\.ids.count)) > cap {
                     ScrollView(.vertical) { blocks }
                         .frame(height: cap)
                         .scrollIndicators(.never)
@@ -298,25 +295,14 @@ enum BurrowDenMetrics {
     static let petBlockHeight: CGFloat = 44
     static let blockPadding: CGFloat = 4
     static let blockSpacing: CGFloat = 2
-    /// The quota line under the name plate (BurrowQuotaLabel).
-    static let quotaLine: CGFloat = 13
 
-    /// Antigravity's groups, one line under its conversations (BurrowQuotaGroups).
-    static let groupsLine: CGFloat = 18
-
-    static func blockHeight(rows: Int, quota: Bool = false, groups: Bool = false) -> CGFloat {
-        max(CGFloat(rows) * rowHeight + (groups ? groupsLine : 0), petBlockHeight + (quota ? quotaLine : 0))
-            + 2 * blockPadding
+    static func blockHeight(rows: Int) -> CGFloat {
+        max(CGFloat(rows) * rowHeight, petBlockHeight) + 2 * blockPadding
     }
 
-    /// All the blocks for agents with these many conversations each, and
-    /// whether each shows its quota under its name or its groups' line.
-    static func height(rows: [Int], quota: [Bool] = [], groups: [Bool] = []) -> CGFloat {
-        rows.indices.map {
-            blockHeight(rows: rows[$0], quota: quota.indices.contains($0) && quota[$0],
-                        groups: groups.indices.contains($0) && groups[$0])
-        }
-        .reduce(0, +) + CGFloat(max(0, rows.count - 1)) * blockSpacing
+    /// All the blocks for agents with these many conversations each.
+    static func height(rows: [Int]) -> CGFloat {
+        rows.map(blockHeight).reduce(0, +) + CGFloat(max(0, rows.count - 1)) * blockSpacing
     }
 }
 
@@ -340,9 +326,6 @@ struct BurrowAgentBlock: View {
                 if let session = ids.first.flatMap({ appState.sessions[$0] }) {
                     BurrowAgentName(source: session.mascotSource, label: session.sourceLabel)
                 }
-                if let quota = pet?.quota, pet?.quotaGroups.isEmpty != false {
-                    BurrowQuotaLabel(remaining: quota, label: pet?.quotaLabel)
-                }
             }
             .frame(width: BurrowDenMetrics.petColumn)
             .padding(.top, 2)
@@ -352,75 +335,10 @@ struct BurrowAgentBlock: View {
                         BurrowSessionRow(appState: appState, session: session, sessionId: sid)
                     }
                 }
-                if let groups = pet?.quotaGroups, !groups.isEmpty {
-                    BurrowQuotaGroups(groups: groups)
-                }
             }
         }
         .padding(.vertical, BurrowDenMetrics.blockPadding)
-        .frame(minHeight: BurrowDenMetrics.blockHeight(rows: ids.count,
-                                                        quota: pet?.quota != nil && pet?.quotaGroups.isEmpty != false,
-                                                        groups: pet?.quotaGroups.isEmpty == false),
-               alignment: .top)
-    }
-}
-
-/// How much of its weekly quota an agent has left, under its name in the
-/// den, in its health bar's colour: "96%", or OpenCode's "¥71 · $17".
-struct BurrowQuotaLabel: View {
-    let remaining: Double
-    let label: String?
-
-    var body: some View {
-        Text(label ?? "\(Int(remaining.rounded()))%")
-            .font(Burrow.font(9.5, .heavy))
-            .monospacedDigit()
-            .foregroundStyle(BurrowHealthBar.color(remaining))
-            .lineLimit(1)
-            .minimumScaleFactor(0.75)
-            .padding(.horizontal, 2)
-            .frame(height: BurrowDenMetrics.quotaLine)
-            .help(L10n.shared["burrow_quota_help"])
-    }
-}
-
-/// Antigravity's quota groups on one line under its conversations: each
-/// name in its own colour from the pet's gradient (Jarvis: Gemini Models
-/// green, Argon violet, Claude·GPT pink), its number in the health colour.
-/// The pet's bar on the notch is Argon's alone.
-struct BurrowQuotaGroups: View {
-    let groups: [WeeklyQuota.Group]
-
-    static let order = ["Gemini Models", "Argon", "Claude·GPT"]
-
-    static func color(_ name: String) -> Color {
-        switch name {
-        case "Gemini Models": Burrow.moss
-        case "Argon": Color(red: 0.600, green: 0.349, blue: 0.902)       // #9959E6
-        case "Claude·GPT": Color(red: 0.902, green: 0.400, blue: 0.549)  // #E6668C
-        default: Burrow.dim
-        }
-    }
-
-    var body: some View {
-        let sorted = groups.sorted { (Self.order.firstIndex(of: $0.name) ?? 9) < (Self.order.firstIndex(of: $1.name) ?? 9) }
-        // One Text, so a squeeze shrinks every group alike.
-        sorted.enumerated().reduce(Text("")) { line, item in
-            let (i, group) = item
-            return line
-                + Text(i == 0 ? "" : "   ")
-                + Text(group.name).foregroundColor(Self.color(group.name))
-                + Text(" \(Int(group.remaining.rounded()))%").foregroundColor(BurrowHealthBar.color(group.remaining))
-        }
-        .font(Burrow.font(11, .heavy))
-        .monospacedDigit()
-        .lineLimit(1)
-        .minimumScaleFactor(0.8)
-        .frame(maxWidth: .infinity, minHeight: BurrowDenMetrics.groupsLine, alignment: .leading)
-        // Under the conversations' titles, past their signs.
-        .padding(.leading, 23)
-        .padding(.trailing, 8)
-        .help(L10n.shared["burrow_quota_help"])
+        .frame(minHeight: BurrowDenMetrics.blockHeight(rows: ids.count), alignment: .top)
     }
 }
 

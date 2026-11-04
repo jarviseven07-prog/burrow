@@ -10,7 +10,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var panelController: PanelWindowController?
     private var hookServer: HookServer?
     private var hookRecoveryTimer: Timer?
-    private var quotaMonitor: QuotaMonitor?
     private var lastHookCheck: Date = .distantPast
     private let hotKeyManager = GlobalHotKeyManager()
     private var localShortcutMonitor: Any?
@@ -61,8 +60,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         appState.startSessionDiscovery()
         appState.startCodexAppServerWatcher()
-        quotaMonitor = QuotaMonitor(appState: appState)
-        quotaMonitor?.start()
 
         // Hooks auto-recovery: periodic + app activation trigger
         hookRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in

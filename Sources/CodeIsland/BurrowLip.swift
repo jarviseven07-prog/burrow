@@ -59,18 +59,9 @@ enum BurrowLipMetrics {
     /// Top of a pet's 24pt frame beside the notch: feet near the bottom of
     /// the menu bar's band. Sprite row r is drawn 1.5·r below the frame's
     /// top (PixelPetView).
-    static func earOffset(rows: PeekRows, bandHeight: CGFloat, raised: Bool = false) -> CGFloat {
-        bandHeight - CGFloat(rows.bodyBottom + 1) * Burrow.petCell - 2 - (raised ? raise : 0)
+    static func earOffset(rows: PeekRows, bandHeight: CGFloat) -> CGFloat {
+        bandHeight - CGFloat(rows.bodyBottom + 1) * Burrow.petCell - 2
     }
-
-    /// While any pet has a health bar, every pet stands two pet pixels
-    /// higher: one row of gap, then the bar, so the bar never runs into
-    /// the feet (design/v24 D).
-    static let raise: CGFloat = 2 * Burrow.petCell
-    /// The health bar's inset from the band's bottom and from the slot's
-    /// leading edge (where the 24pt pet starts).
-    static let barBottom: CGFloat = 0.5
-    static let barLeading: CGFloat = (petSlot - Burrow.petSize) / 2
 }
 
 /// Rows of a sprite that peeking cares about.
@@ -231,12 +222,6 @@ struct BurrowPeekPet: Identifiable, Equatable {
     /// A conversation's last turn finished since the den was last opened: a
     /// spark stays by the pet until you have looked.
     var doneUnseen = false
-    /// Weekly quota left, 0–100: a health bar under the pet. Nil, no bar.
-    var quota: Double? = nil
-    /// What the den writes for it instead of "96%" (OpenCode's balances).
-    var quotaLabel: String? = nil
-    /// Antigravity's groups, listed in the den under its conversations.
-    var quotaGroups: [WeeklyQuota.Group] = []
     /// The craft it acts out beside the notch while it works.
     var work: PetWork? = nil
 }
@@ -312,9 +297,6 @@ enum BurrowResidents {
                 doneUnseen: sessions.contains {
                     BurrowSpark.isUnseen($0.1, doneAt: appState.turnDoneAt[$0.0], seenAt: appState.denSeenAt)
                 },
-                quota: appState.quotaRemaining[group.agent],
-                quotaLabel: appState.quotaLabel[group.agent],
-                quotaGroups: appState.quotaGroups[group.agent] ?? [],
                 work: shown.flatMap { BurrowPetSign.work(of: $0.1) }
             )
         }
@@ -440,7 +422,6 @@ struct BurrowLip: View {
 
     private var pets: [BurrowPeekPet] { layout.pets }
     private var overflow: Int { layout.overflow }
-    private var raised: Bool { pets.contains { $0.quota != nil } }
 
     var body: some View {
         let left = layout.left, right = layout.right
@@ -495,21 +476,9 @@ struct BurrowLip: View {
                     BurrowSpark().offset(x: BurrowSpark.x, y: BurrowSpark.y)
                 }
             }
-            .alignmentGuide(.top) { d in
-                d[.top] - BurrowLipMetrics.earOffset(rows: pet.rows, bandHeight: bandHeight, raised: raised)
-            }
+            .alignmentGuide(.top) { d in d[.top] - BurrowLipMetrics.earOffset(rows: pet.rows, bandHeight: bandHeight) }
             .burrowHero(pet.id)
             .frame(width: BurrowLipMetrics.petSlot, height: bandHeight, alignment: .top)
-            // Its weekly quota, under its feet; the night light takes the
-            // floor while it needs you.
-            .overlay(alignment: .bottomLeading) {
-                if let quota = pet.quota, !BurrowLipMetrics.isLit(pet.state) {
-                    BurrowHealthBar(remaining: quota)
-                        .padding(.leading, BurrowLipMetrics.barLeading)
-                        .padding(.bottom, BurrowLipMetrics.barBottom)
-                        .transition(.opacity)
-                }
-            }
             // Two or more conversations: how many, in the pet's own colour,
             // above its head on its own side of the slot.
             .overlay(alignment: .topLeading) {
@@ -636,35 +605,6 @@ extension View {
                     .offset(y: feet - BurrowNightLight.glowCells * cell)
                     .transition(.opacity.animation(.easeInOut(duration: 0.5)))
             }
-        }
-    }
-}
-
-/// An agent's weekly quota as a long thin bar of pet pixels under its pet:
-/// green while healthy, orange when short, red under 15% (design/v24 D).
-struct BurrowHealthBar: View {
-    let remaining: Double
-    /// From the pet's left edge past its right (sized when a laptop stood
-    /// beside the pet; kept since design/v25).
-    static let cells = 18
-    static let rows = 2
-
-    var body: some View {
-        let cell = Burrow.petCell
-        let lit = WeeklyQuota.litCells(remaining, of: Self.cells)
-        HStack(spacing: 0) {
-            Rectangle().fill(Self.color(remaining)).frame(width: CGFloat(lit) * cell)
-            Rectangle().fill(Burrow.ink.opacity(0.28))
-        }
-        .frame(width: CGFloat(Self.cells) * cell, height: CGFloat(Self.rows) * cell)
-        .accessibilityHidden(true)
-    }
-
-    static func color(_ remaining: Double) -> Color {
-        switch WeeklyQuota.health(remaining) {
-        case .good: Burrow.moss
-        case .short: Burrow.quotaShort
-        case .critical: Burrow.ember
         }
     }
 }

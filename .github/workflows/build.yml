@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: xcodebuild -version && swift --version
-      - run: swift test --filter "WeeklyQuotaTests|BurrowFinishedIdleTests|IdleClaudeCompactionTests|ClaudeSilentTurnTests|BackgroundClaudeAgentTests|QuotaLookupDeadlineTests|AntigravityUsageSessionTests|ClaudeTranscriptTitleTests|RestoreMidTurnTests|DenLookAndCloseTests|DenCloseReopensHeldCardTests|PanelClickOutsideTests|DenRowsUnderPointerTests|SettingsWithHiddenPanelTests|DenBackSettingsTests"
+      - run: swift test --filter "BurrowFinishedIdleTests|IdleClaudeCompactionTests|ClaudeSilentTurnTests|BackgroundClaudeAgentTests|ClaudeTranscriptTitleTests|RestoreMidTurnTests|DenLookAndCloseTests|DenCloseReopensHeldCardTests|PanelClickOutsideTests|DenRowsUnderPointerTests|SettingsWithHiddenPanelTests|DenBackSettingsTests|QuotaRemovedTests"
       # Approvals (health check 2026-11-04 #1-3, 6, 7, 10, 16, 17) and the tests around them.
       - run: swift test --filter "AppStateToolUseCacheTests|ApprovalHealthCheckTests|CardShortcutTests|CommandGistTests|DangerousCommandTests|OpenCodeV2SupportTests|AppStatePermissionFlowTests|AppStateAnswerRoutingTests|BackgroundAgentApprovalTests|testEveryDangerHasAReasonInEveryLanguage"
       # Pet motion (design/v25 B).

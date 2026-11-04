@@ -212,8 +212,17 @@ class SettingsManager {
         defaults.set(true, forKey: fermataMigratedCompletionOffKey)
     }
 
+    /// The weekly-quota bars are gone (11-04): Antigravity's `/usage`
+    /// conversation id they kept is no longer needed.
+    nonisolated static let removedQuotaKeys = ["quotaAntigravitySessionId"]
+
+    nonisolated static func forgetRemovedQuota(defaults: UserDefaults = .standard) {
+        removedQuotaKeys.forEach(defaults.removeObject(forKey:))
+    }
+
     private init() {
         Self.migrateCompletionCardOffOnce(defaults: defaults)
+        Self.forgetRemovedQuota(defaults: defaults)
         defaults.register(defaults: [
             SettingsKey.displayChoice: SettingsDefaults.displayChoice,
             SettingsKey.allowHorizontalDrag: SettingsDefaults.allowHorizontalDrag,
