@@ -163,8 +163,11 @@ struct NotchPanelView: View {
     private var showBar: Bool {
         isActive && !(hideWhenNoSession && appState.activeSessionCount == 0)
     }
+    /// The den's back (settings) shows even with nothing else to show
+    /// ("hide when no session" and no conversations): the menu bar item
+    /// opens it there (health check #22).
     private var shouldShowExpanded: Bool {
-        (showBar || showIdleIndicator) && appState.surface.isExpanded
+        (showBar || showIdleIndicator || appState.denShowsSettings) && appState.surface.isExpanded
     }
 
     // MARK: Burrow
@@ -234,7 +237,7 @@ struct NotchPanelView: View {
     private var collapsedPanelWidth: CGFloat { panelWidth(expanded: false) }
 
     private func panelWidth(expanded: Bool) -> CGFloat {
-        if expanded && (showBar || showIdleIndicator) { return expandedPanelWidth }
+        if expanded && (showBar || showIdleIndicator || appState.denShowsSettings) { return expandedPanelWidth }
         if showBar || showIdleIndicator {
             let prehoverExtra: CGFloat = shouldShowPrehover ? NotchHoverInteraction.prehoverWidthDelta : 0
             return burrowCollapsedWidth + prehoverExtra
@@ -341,11 +344,12 @@ struct NotchPanelView: View {
                         // request, not whatever is at the head of the queue. (#308)
                         if let pending = appState.pendingPermission(forSession: sid) {
                             let session = appState.sessions[sid]
+                            let count = appState.permissionCardCount(forSession: sid)
                             BurrowApprovalCard(
                                 tool: pending.event.toolName ?? "Unknown",
                                 toolInput: pending.event.toolInput,
-                                queuePosition: appState.permissionQueuePosition(forSession: sid),
-                                queueTotal: appState.permissionQueue.count,
+                                queuePosition: count.position,
+                                queueTotal: count.total,
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
@@ -360,6 +364,7 @@ struct NotchPanelView: View {
                     case .questionCard(let sid):
                         let session = appState.sessions[sid]
                         if let q = appState.pendingQuestion(forSession: sid) {
+                            let count = appState.questionCardCount(forSession: sid)
                             QuestionBar(
                                 question: q.question.question,
                                 options: q.question.options,
@@ -371,8 +376,8 @@ struct NotchPanelView: View {
                                 session: session,
                                 sessionId: sid,
                                 appState: appState,
-                                queuePosition: appState.questionQueuePosition(forSession: sid),
-                                queueTotal: appState.questionQueue.count,
+                                queuePosition: count.position,
+                                queueTotal: count.total,
                                 onAnswer: { appState.answerQuestion($0, expectedSessionId: sid) },
                                 onAnswerMulti: { appState.answerQuestionMulti($0, expectedSessionId: sid) },
                                 onSkip: { appState.skipQuestion(expectedSessionId: sid) },
@@ -568,9 +573,7 @@ struct NotchPanelView: View {
                             // A request that arrived while the den was open was
                             // held for it; the den has no approve buttons, so once
                             // it closes the request opens the way it would have.
-                            if !appState.visiblePermissionSessionIds.isEmpty || appState.nextVisibleQuestion != nil {
-                                withAnimation(NotchAnimation.open) { appState.showNextPending() }
-                            }
+                            appState.openHeldRequest()
                         }
                     }
                 }

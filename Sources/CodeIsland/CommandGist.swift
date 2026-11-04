@@ -12,6 +12,9 @@ enum CommandGist {
         let known: Bool
         /// False for a step that only looks (ls, git status, grep…).
         var changes = true
+        /// Output written into a file (`> build.log`): said, but after the
+        /// other changes when there are more than two steps.
+        var isWrite = false
     }
 
     /// The gist of `command`; nil when it only moves around (cd, echo…).
@@ -19,15 +22,24 @@ enum CommandGist {
         let words = Words(language)
         var steps: [Gist] = []
         for part in segments(of: command) {
-            guard let step = part.piped ? pipedGist(of: part.words, words) : gist(of: part.words, words) else { continue }
-            if !steps.contains(where: { $0.text == step.text }) { steps.append(step) }
+            var said: [Gist] = []
+            let step = part.piped ? pipedGist(of: part.words, words) : gist(of: part.words, words)
+            let write = writeGist(of: part.words, words)
+            // Output that goes into a file is not shown to anyone: a look
+            // whose output is written is the write (`cat /dev/null > ~/.zshrc`).
+            if let step, write == nil || step.changes { said.append(step) }
+            if let write { said.append(write) }
+            for step in said where !steps.contains(where: { $0.text == step.text }) { steps.append(step) }
         }
         guard !steps.isEmpty else { return nil }
         // Two steps are said. With more, the ones that change something come
         // first, so a push or a delete is never hidden behind two looks
-        // (design/v20 review); they keep the order they run in.
-        var pick = Array(steps.indices.filter { steps[$0].changes }.prefix(2))
-        for i in steps.indices where pick.count < 2 && !pick.contains(i) { pick.append(i) }
+        // (design/v20 review) — or behind a log file being written; they keep
+        // the order they run in.
+        func rank(_ step: Gist) -> Int { step.changes ? (step.isWrite ? 1 : 2) : 0 }
+        let pick = steps.indices.sorted { a, b in
+            rank(steps[a]) != rank(steps[b]) ? rank(steps[a]) > rank(steps[b]) : a < b
+        }.prefix(2)
         let shown = pick.sorted().map { steps[$0] }
         var text = shown.map(\.text).joined(separator: words.then)
         if steps.count > 2 { text += String(format: words.steps, steps.count) }
@@ -76,12 +88,22 @@ enum CommandGist {
             while i < chars.count {
                 let c = chars[i]
                 if let q = quote {
+                    if q == "\"", c == "\\", i + 1 < chars.count, "\"\\$`".contains(chars[i + 1]) {
+                        word.append(chars[i + 1]); i += 2   // "a \" b" stays one quote
+                        continue
+                    }
                     if c == q { quote = nil } else { word.append(c) }
                 } else if depth > 0 {
                     if c == "(" { depth += 1 } else if c == ")" { depth -= 1 }
                     word.append(c)
                 } else if c == "'" || c == "\"" {
                     quote = c
+                } else if c == "\\", i + 1 < chars.count {
+                    // \; \| \  are plain characters: find's `-exec … \;` is one command.
+                    // \> \< keep their backslash, or they would read as redirects.
+                    if "<>".contains(chars[i + 1]) { word.append(c) }
+                    word.append(chars[i + 1]); i += 2
+                    continue
                 } else if c == "$", i + 1 < chars.count, chars[i + 1] == "(" {
                     depth = 1; word.append("$("); i += 1
                 } else if c == "#", word.isEmpty {
@@ -115,6 +137,15 @@ enum CommandGist {
                     endWord()
                     i = j
                     continue
+                } else if c == ">" {
+                    // An unquoted > redirects wherever it stands (`x>~/.zshrc`):
+                    // it starts a word of its own, keeping a 2 or & in front
+                    // (2>, &>). Arrows (->, =>) and markup (<a:t>) are text
+                    // whose nested quotes this reading lost.
+                    let staysInWord = word.allSatisfy(\.isNumber) || word == "&"
+                        || word.hasSuffix(">") || word.hasSuffix("-") || word.hasSuffix("=") || word.contains("<")
+                    if !staysInWord { endWord() }
+                    word.append(c)
                 } else if c == " " || c == "\t" {
                     endWord()
                 } else {
@@ -136,7 +167,9 @@ enum CommandGist {
         "alias", "unalias", "shift", "trap", "eval",
     ]
     /// Words that run the command after them.
-    static let wrappers: Set<String> = ["time", "env", "nohup", "exec", "command", "builtin", "caffeinate", "timeout"]
+    static let wrappers: Set<String> = ["time", "env", "nohup", "exec", "command", "builtin", "caffeinate", "timeout", "gtimeout"]
+    /// Options of those that take a value (`timeout -s KILL`, `env -u NAME`).
+    private static let wrapperValued: Set<String> = ["-s", "-k", "--signal", "--kill-after", "-u", "--unset"]
     /// Programs that only filter what comes down a pipe.
     static let filters: Set<String> = [
         "grep", "rg", "ag", "egrep", "fgrep", "ack", "head", "tail", "sort", "uniq", "wc", "cut", "awk",
@@ -151,11 +184,7 @@ enum CommandGist {
     private static func pipedGist(of segment: [String], _ w: Words) -> Gist? {
         var rest = segment[...]
         if let head = rest.first, (head as NSString).lastPathComponent == "xargs" {
-            rest = rest.dropFirst()
-            while let flag = rest.first, flag.hasPrefix("-") {
-                rest = rest.dropFirst()
-                if xargsValued.contains(flag) { rest = rest.dropFirst() }
-            }
+            rest = dropXargs(rest)
         }
         guard let program = rest.first else { return nil }
         let name = (program as NSString).lastPathComponent
@@ -163,6 +192,44 @@ enum CommandGist {
             && rest.contains(where: { $0 == "-i" || $0.hasPrefix("-i") || $0 == "-pi" })
         if filters.contains(name), !editsInPlace { return nil }
         return gist(of: Array(rest), w)
+    }
+
+    /// The words after `xargs` and its options.
+    private static func dropXargs(_ words: ArraySlice<String>) -> ArraySlice<String> {
+        var rest = words.dropFirst()
+        while let flag = rest.first, flag.hasPrefix("-") {
+            rest = rest.dropFirst()
+            if xargsValued.contains(flag) { rest = rest.dropFirst() }
+        }
+        return rest
+    }
+
+    /// "覆盖写入 .zshrc" when a command's output goes into a file (`>`, `>>`,
+    /// `2>`, `&>`…); nil when it goes nowhere that lasts (/dev/null, 2>&1).
+    private static func writeGist(of segment: [String], _ w: Words) -> Gist? {
+        var targets: [String] = [], appends = true
+        var i = 0
+        while i < segment.count {
+            let word = segment[i]
+            guard let match = word.range(of: #"^(?:\d|&)?(>>?)"#, options: .regularExpression) else { i += 1; continue }
+            let op = word[match]
+            var target = String(word[match.upperBound...])
+            if target.isEmpty, i + 1 < segment.count {
+                target = segment[i + 1]
+                i += 1
+            } else if target.first == ">" || target.contains(where: \.isWhitespace) {
+                i += 1
+                continue  // a quoted ">>> hi" that lost its quotes, not a redirect
+            }
+            i += 1
+            // `2>&1`, `>&2`: one output joins another, no file.
+            guard !target.isEmpty, !target.hasPrefix("&"), !target.hasPrefix("/dev/") else { continue }
+            if !op.hasSuffix(">>") { appends = false }
+            targets.append(target)
+        }
+        let files = names(targets)
+        guard !files.isEmpty else { return nil }
+        return Gist(text: String(format: appends ? w.append : w.overwrite, w.list(files)), known: true, isWrite: true)
     }
 
     /// The command's arguments, without redirections.
@@ -200,7 +267,18 @@ enum CommandGist {
                 while let flag = rest.first, flag.hasPrefix("-") { rest = rest.dropFirst() }
             } else if wrappers.contains(head) {
                 rest = rest.dropFirst()
-                while let flag = rest.first, flag.hasPrefix("-") || flag.contains("=") { rest = rest.dropFirst() }
+                while let flag = rest.first, flag.hasPrefix("-") || flag.contains("=") {
+                    rest = rest.dropFirst()
+                    if wrapperValued.contains(flag) { rest = rest.dropFirst() }
+                }
+                // `timeout 60 rm -rf build`: the duration is not the command.
+                if head.hasSuffix("timeout"), let duration = rest.first,
+                   duration.range(of: #"^\d+(\.\d+)?[smhd]?$"#, options: .regularExpression) != nil {
+                    rest = rest.dropFirst()
+                }
+            } else if head == "xargs" {
+                // `xargs rm -rf < dirs.txt` runs rm whether or not it is piped.
+                rest = dropXargs(rest)
             } else {
                 break
             }
@@ -221,7 +299,9 @@ enum CommandGist {
             if let fallback { return known(fallback) }
             // "删掉文件", not "删掉 文件": the space is only for Latin names.
             let text = String(format: template, w.files)
-            return known(w.files.first?.isASCII == false ? text.replacingOccurrences(of: " " + w.files, with: w.files) : text)
+            guard w.files.first?.isASCII == false else { return known(text) }
+            return known(text.replacingOccurrences(of: " " + w.files, with: w.files)
+                .replacingOccurrences(of: w.files + " ", with: w.files))
         }
         let positional = args.filter { !$0.hasPrefix("-") }
         let sub = positional.first ?? ""
@@ -241,7 +321,18 @@ enum CommandGist {
         case "cat", "head", "tail", "less", "more", "bat", "open-file":
             let files = names(args.filter { Int($0) == nil })
             return files.isEmpty ? nil : looks(with(w.look, files).text)
-        case "ls", "tree", "find", "fd", "du", "stat", "file":
+        case "find":
+            // -delete and -exec are not looks (health check 2026-11-04 #7).
+            if args.contains("-delete") { return known(w.findDelete) }
+            // Every -exec counts; one that changes something is said first.
+            let ends: Set<String> = [";", "+"]
+            let runs = args.indices
+                .filter { ["-exec", "-execdir", "-ok", "-okdir"].contains(args[$0]) }
+                .compactMap { i in
+                    gist(of: Array(args[(i + 1)...].prefix { !ends.contains($0) }.filter { $0 != "{}" }), w)
+                }
+            return runs.first(where: \.changes) ?? runs.first ?? looks(w.listing)
+        case "ls", "tree", "fd", "du", "stat", "file":
             return looks(w.listing)
         case "grep", "rg", "ag", "egrep", "fgrep", "ack":
             guard let pattern = positional.first else { return looks(w.searching) }
@@ -362,13 +453,28 @@ enum CommandGist {
         case "log", "reflog", "blame", "shortlog": return looks(w.gitLog)
         case "add": return known(w.gitAdd)
         case "commit": return known(w.gitCommit)
-        case "push": return known(w.gitPush)
+        case "push":
+            // `--delete` / `-d` / `:branch` delete a branch on the remote.
+            let refs = rest.filter { !$0.hasPrefix("-") }.dropFirst()
+            let deleting = rest.contains("--delete") || rest.contains("-d")
+                ? Array(refs) : refs.filter { $0.count > 1 && $0.hasPrefix(":") }.map { String($0.dropFirst()) }
+            return deleting.isEmpty ? known(w.gitPush) : known(String(format: w.gitDeleteRemote, w.list(deleting)))
         case "pull", "fetch": return known(w.gitPull)
-        case "checkout", "switch", "branch": return known(w.gitBranch)
+        case "checkout", "switch":
+            // `checkout -- file`, `checkout .`, `-f`: uncommitted work is thrown away.
+            let discards = rest.contains("--") || rest.first(where: { !$0.hasPrefix("-") }) == "."
+                || rest.contains("-f") || rest.contains("--force") || rest.contains("--discard-changes")
+            return known(discards ? w.gitResetHard : w.gitBranch)
+        case "branch":
+            let deletes = rest.contains { $0 == "--delete" || ($0.hasPrefix("-") && !$0.hasPrefix("--") && $0.lowercased().contains("d")) }
+            let branches = rest.filter { !$0.hasPrefix("-") }
+            return deletes && !branches.isEmpty
+                ? known(String(format: w.gitDeleteBranch, w.list(branches))) : known(w.gitBranch)
         case "merge", "rebase", "cherry-pick": return known(w.gitMerge)
         case "reset": return known(rest.contains("--hard") ? w.gitResetHard : w.gitReset)
         case "restore": return known(w.gitReset)
-        case "stash": return known(w.gitStash)
+        case "stash":
+            return known(rest.first == "drop" || rest.first == "clear" ? w.gitStashDrop : w.gitStash)
         case "clone": return known(w.gitClone)
         case "rm", "mv": return known(w.gitAdd)
         case "clean": return known(w.gitClean)
@@ -407,8 +513,10 @@ enum CommandGist {
         let then, steps, wants, admin, files, and, more: String
         let moreCountsAll: Bool
         let remove, trash, move, copy, mkdir, touch, look, listing, search, searching, count, edit, text: String
+        let findDelete, overwrite, append: String
         let gitStatus, gitDiff, gitLog, gitAdd, gitCommit, gitPush, gitPull, gitBranch, gitMerge: String
         let gitReset, gitResetHard, gitStash, gitClone, gitClean, gitTag, gitInit: String
+        let gitDeleteBranch, gitDeleteRemote, gitStashDrop: String
         let install, test, build, compile, serve, lint, runScript, runPython, pythonSnippet, runProgram: String
         let installApp, brew, web, webAny, open, osascript, screenshot, image, video: String
         let readSettings, writeSettings, kill, processes, permissions, archive, remote, sign, docker, run: String
@@ -436,6 +544,7 @@ enum CommandGist {
                 look = "查看 %@"; listing = "看看文件夹里有什么"
                 search = "在文件里搜「%@」"; searching = "在文件里搜东西"
                 count = "数一数行数"; edit = "改文件 %@"; text = "整理文字"
+                findDelete = "删掉找到的文件"; overwrite = "覆盖写入 %@"; append = "往 %@ 末尾追加内容"
                 gitStatus = "看看改了哪些文件"; gitDiff = "看看具体改了什么"
                 gitLog = "看提交记录"; gitAdd = "把改动放进暂存"
                 gitCommit = "提交改动（存一个版本）"; gitPush = "上传到远端仓库"
@@ -444,6 +553,8 @@ enum CommandGist {
                 gitResetHard = "丢掉还没提交的改动"; gitStash = "把改动先收起来"
                 gitClone = "下载一个仓库"; gitClean = "删掉没纳入 git 的文件"
                 gitTag = "给版本打标签"; gitInit = "新建一个 git 仓库"
+                gitDeleteBranch = "删掉分支 %@"; gitDeleteRemote = "删掉远端的分支 %@"
+                gitStashDrop = "丢掉收起来的改动"
                 install = "安装依赖包"; test = "跑测试"; build = "构建项目"
                 compile = "编译"; serve = "启动开发服务器"; lint = "检查代码"
                 runScript = "运行脚本 %@"; runPython = "运行 Python 脚本 %@"
@@ -463,6 +574,7 @@ enum CommandGist {
                 mkdir = "make the folder %@"; touch = "create %@"; look = "look at %@"; listing = "list a folder"
                 search = "search the files for “%@”"; searching = "search the files"; count = "count lines"
                 edit = "edit %@"; text = "sort out some text"
+                findDelete = "delete the files it finds"; overwrite = "overwrite %@"; append = "append to %@"
                 gitStatus = "see which files changed"; gitDiff = "see what changed"; gitLog = "read the commit history"
                 gitAdd = "stage the changes"; gitCommit = "commit the changes (save a version)"
                 gitPush = "upload to the remote repository"; gitPull = "pull the latest code"
@@ -470,6 +582,8 @@ enum CommandGist {
                 gitResetHard = "throw away uncommitted changes"; gitStash = "put the changes aside"
                 gitClone = "download a repository"; gitClean = "delete files git doesn't track"
                 gitTag = "tag a version"; gitInit = "start a git repository"
+                gitDeleteBranch = "delete the branch %@"; gitDeleteRemote = "delete %@ on the remote"
+                gitStashDrop = "throw away the stashed changes"
                 install = "install dependencies"; test = "run the tests"; build = "build the project"; compile = "compile"
                 serve = "start the dev server"; lint = "check the code"; runScript = "run the script %@"
                 runPython = "run the Python script %@"; pythonSnippet = "run some Python"; runProgram = "run the program"

@@ -9,14 +9,28 @@ struct PermissionRequest {
     let id: UUID
     let event: HookEvent
     let continuation: CheckedContinuation<Data, Never>
+    /// The tool call this request is about. Claude Code's and Codex's
+    /// PermissionRequest carry no tool_use_id, so it is usually the id of the
+    /// call's own PreToolUse, found by `AppState.correlatedToolUseId(for:)`.
+    /// Only that call's own events answer the request.
+    let toolUseId: String?
+    /// The hook socket waiting for this answer (HookServer). When it closes,
+    /// only this request goes — not the agent's others (health check #6).
+    let connectionId: UUID?
 
-    init(id: UUID = UUID(), event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    init(
+        id: UUID = UUID(),
+        event: HookEvent,
+        continuation: CheckedContinuation<Data, Never>,
+        toolUseId: String? = nil,
+        connectionId: UUID? = nil
+    ) {
         self.id = id
         self.event = event
         self.continuation = continuation
+        self.toolUseId = toolUseId ?? event.toolUseId
+        self.connectionId = connectionId
     }
-
-    var toolUseId: String? { event.toolUseId }
 }
 
 struct AskUserQuestionItem {
@@ -90,6 +104,8 @@ struct QuestionRequest {
     /// true when converted from AskUserQuestion PermissionRequest
     let isFromPermission: Bool
     var askUserQuestionState: AskUserQuestionState?
+    /// The hook socket waiting for this answer, as for `PermissionRequest`.
+    var connectionId: UUID?
 
     init(
         event: HookEvent,

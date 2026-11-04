@@ -17,6 +17,10 @@ struct PreToolUseRecord {
     let toolDescription: String?
     let toolInput: [String: Any]?
     let receivedAt: Date
+    /// Which agent made the call (nil: the main thread) and the tool's own
+    /// name, so a PermissionRequest without an id can find its call.
+    var agentId: String? = nil
+    var rawToolName: String? = nil
 }
 
 extension AppState {
@@ -35,8 +39,52 @@ extension AppState {
             toolName: event.activityLabel,
             toolDescription: event.toolDescription,
             toolInput: event.toolInput,
-            receivedAt: Date()
+            receivedAt: Date(),
+            agentId: event.agentId,
+            rawToolName: event.toolName
         )
+    }
+
+    /// Two tool inputs of the same call. `description` is left out: Codex adds
+    /// the approval reason there on PermissionRequest only.
+    static func sameToolInput(_ lhs: [String: Any]?, _ rhs: [String: Any]?) -> Bool {
+        var lhs = lhs ?? [:]
+        var rhs = rhs ?? [:]
+        lhs.removeValue(forKey: "description")
+        rhs.removeValue(forKey: "description")
+        return NSDictionary(dictionary: lhs).isEqual(to: rhs)
+    }
+
+    /// The tool_use_id of the call a PermissionRequest is about.
+    ///
+    /// Claude Code's PermissionRequest carries none (hooks docs: "like
+    /// PreToolUse hooks, but without tool_use_id"), nor does Codex's. The call's
+    /// own PreToolUse — same conversation, agent, tool and input — came just
+    /// before it, so its id is taken from there. Only a single match counts:
+    /// two identical calls in flight cannot be told apart, and a wrong guess
+    /// would let one call's progress answer the other.
+    func correlatedToolUseId(for event: HookEvent) -> String? {
+        if let id = event.toolUseId, !id.isEmpty { return id }
+        let sessionId = event.sessionId ?? "default"
+        let claimed = Set(permissionQueue.compactMap(\.toolUseId))
+        let matches = pendingToolUses.filter { id, record in
+            !claimed.contains(id) && Self.record(record, isCallOf: event, sessionId: sessionId)
+        }
+        return matches.count == 1 ? matches.first?.key : nil
+    }
+
+    private static func record(_ record: PreToolUseRecord, isCallOf event: HookEvent, sessionId: String) -> Bool {
+        record.sessionId == sessionId
+            && record.agentId == event.agentId
+            && record.rawToolName == event.toolName
+            && sameToolInput(record.toolInput, event.toolInput)
+    }
+
+    /// A call you deny never runs and never posts; forget its PreToolUse so
+    /// it cannot make Claude's retry of the same command look ambiguous.
+    func forgetToolUse(of request: PermissionRequest) {
+        guard let id = request.toolUseId, !id.isEmpty else { return }
+        pendingToolUses.removeValue(forKey: id)
     }
 
     /// Drop cache entries for a completed tool invocation. If a PermissionRequest for the
@@ -74,51 +122,67 @@ extension AppState {
         }
     }
 
-    /// Resolve permission requests that can never be correlated by tool_use_id.
+    /// Let go of permission requests the agent has moved past, for the ones
+    /// whose call has no known tool_use_id (no PreToolUse matched it).
     ///
-    /// resolveToolUseIfCompleted only drains a queued permission when a later event
-    /// carries the SAME non-empty tool_use_id. But Claude Code's PermissionRequest (or
-    /// its follow-up PostToolUse/Stop) sometimes carries NO tool_use_id at all — when
-    /// that happens the parked continuation has nothing to match against, so approving
-    /// in the terminal never dismisses the card (#216).
+    /// Requests with an id are left to `resolveToolUseIfCompleted`: only their
+    /// own call's events answer them. Without one, approving in the terminal
+    /// would leave the card up forever (#216), so two signals still count:
+    /// - the request's own tool finished — a PostToolUse with the same tool and
+    ///   input, while no other call that looks the same is in flight;
+    /// - the turn ended (Stop) or a new one began (UserPromptSubmit).
+    /// Another tool starting or finishing does not: Claude runs several tools of
+    /// one message at once, and their hooks arrive while a request waits
+    /// (health check 2026-11-04 #1). Only the agent that asked can move past
+    /// its own prompt — a background agent's hooks never count (design/v20).
     ///
-    /// When a follow-up activity event arrives for a session, treat any queued
-    /// permission for that session whose tool_use_id is empty/nil as approved-in-terminal:
-    /// resume with an allow and remove it. Requests that DO carry a tool_use_id are left
-    /// alone — they still wait for proper correlation so parallel tool calls don't deny
-    /// each other (#147). Only the agent that asked can move on past its own prompt:
-    /// a background agent's tool hooks in the same session never approve the main
-    /// thread's request, or the other way round (Burrow design/v20 review).
+    /// Burrow answers these with no decision: the user said nothing here, and
+    /// an agent that somehow still waits falls back to its own prompt.
     func resolveOrphanPermissionsOnActivity(_ event: HookEvent) {
         let normalized = EventNormalizer.normalize(event.eventName)
-        // Only activity events that mean "the agent moved on" past the prompt. A new
-        // PermissionRequest/Question is handled by their own enqueue paths, not here.
-        let activityEvents: Set<String> = [
-            "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "UserPromptSubmit"
-        ]
-        guard activityEvents.contains(normalized) else { return }
-
         let sessionId = event.sessionId ?? "default"
         func isOrphan(_ item: PermissionRequest) -> Bool {
             (item.event.sessionId ?? "default") == sessionId
                 && item.event.agentId == event.agentId
                 && (item.toolUseId?.isEmpty ?? true)
         }
-        guard permissionQueue.contains(where: isOrphan) else { return }
 
-        let headWasOrphan = permissionQueue.first.map(isOrphan) ?? false
+        let movedPast: Set<UUID>
+        switch normalized {
+        case "Stop", "UserPromptSubmit":
+            movedPast = Set(permissionQueue.filter(isOrphan).map(\.id))
+        case "PostToolUse", "PostToolUseFailure":
+            // Its own id was already dropped by resolveToolUseIfCompleted, so
+            // any record left that looks the same is another call in flight.
+            // Each of those may still own one waiting card; a card beyond them
+            // belongs to the call that just finished. Identical cards look the
+            // same to the user, so the oldest goes.
+            let lookalikesInFlight = pendingToolUses.values.filter {
+                Self.record($0, isCallOf: event, sessionId: sessionId)
+            }.count
+            let waiting = permissionQueue.filter {
+                isOrphan($0)
+                    && $0.event.toolName == event.toolName
+                    && Self.sameToolInput($0.event.toolInput, event.toolInput)
+            }
+            guard waiting.count > lookalikesInFlight, let own = waiting.first else { return }
+            movedPast = [own.id]
+        default:
+            return
+        }
+        guard !movedPast.isEmpty else { return }
 
-        let allowBody = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+        let headWasResolved = permissionQueue.first.map { movedPast.contains($0.id) } ?? false
         permissionQueue.removeAll { item in
-            guard isOrphan(item) else { return false }
-            log.notice("✅ permission approve reason=resolveOrphanPermissionsOnActivity session=\(sessionId, privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
-            item.continuation.resume(returning: Data(allowBody.utf8))
+            guard movedPast.contains(item.id) else { return false }
+            log.notice("permission let go reason=resolveOrphanPermissionsOnActivity session=\(sessionId, privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public) triggerEvent=\(normalized, privacy: .public)")
+            item.continuation.resume(returning: Self.noDecisionResponse)
             return true
         }
 
-        // If the card we were showing was a drained orphan, advance to the next pending
-        // request (or collapse if nothing is left).
-        if headWasOrphan {
+        // If the card we were showing was one of them, advance to the next
+        // pending request (or collapse if nothing is left).
+        if headWasResolved {
             if permissionQueue.isEmpty {
                 if case .approvalCard = surface {
                     surface = .collapsed
@@ -128,6 +192,47 @@ extension AppState {
             }
         }
     }
+
+    /// The request an agent says was answered somewhere else. OpenCode's plugin
+    /// forwards `permission.replied` / `question.replied` / `form.replied` as a
+    /// PostToolUse that names its `_opencode_request_id` (health check
+    /// 2026-11-04 #2): two requests can wait in one OpenCode conversation, and
+    /// answering one in the TUI must not settle the other.
+    static func requestAnsweredElsewhere(by event: HookEvent) -> String? {
+        let normalized = EventNormalizer.normalize(event.eventName)
+        guard normalized == "PostToolUse" || normalized == "PostToolUseFailure",
+              let id = event.rawJSON["_opencode_request_id"] as? String, !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    /// Let go of the one request, approval or question, that the agent says was
+    /// answered elsewhere. No decision goes back: the plugin then replies nothing.
+    func resolveRequestAnsweredElsewhere(_ requestId: String, sessionId: String) {
+        func isNamed(_ event: HookEvent) -> Bool {
+            (event.sessionId ?? "default") == sessionId
+                && (event.rawJSON["_opencode_request_id"] as? String) == requestId
+        }
+        var settled = false
+        permissionQueue.removeAll { item in
+            guard isNamed(item.event) else { return false }
+            log.notice("permission let go reason=answeredElsewhere session=\(sessionId, privacy: .public) request=\(requestId, privacy: .public)")
+            item.continuation.resume(returning: Self.noDecisionResponse)
+            settled = true
+            return true
+        }
+        questionQueue.removeAll { item in
+            guard !item.isCodexAppServer, isNamed(item.event) else { return false }
+            item.resolution.resumeHook(returning: Self.noDecisionResponse)
+            settled = true
+            return true
+        }
+        if settled { showNextPending() }
+    }
+
+    /// A hook answer with no decision: the agent goes on as if Burrow had not
+    /// been asked.
+    static let noDecisionResponse = Data("{}".utf8)
 
     /// Remove stale cache entries. Called from the cleanup timer tick.
     func prunePendingToolUses(now: Date = Date()) {
@@ -165,7 +270,8 @@ extension AppState {
         // Same request, new waiter: it keeps its identity, so its reminders
         // and the card showing it carry on rather than starting over.
         permissionQueue[existingIndex] = PermissionRequest(
-            id: existing.id, event: request.event, continuation: request.continuation
+            id: existing.id, event: request.event, continuation: request.continuation,
+            toolUseId: request.toolUseId, connectionId: request.connectionId
         )
         return true
     }

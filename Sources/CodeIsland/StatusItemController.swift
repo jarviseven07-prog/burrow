@@ -108,9 +108,11 @@ final class StatusItemController: NSObject {
         return menu
     }
 
+    /// Through `AppDelegate.shared`: `NSApp.delegate` is SwiftUI's wrapper,
+    /// and the cast this used never reached Burrow (health check #22).
     @objc private func openSettings() {
         Task { @MainActor in
-            (NSApp.delegate as? AppDelegate)?.showSettings()
+            AppDelegate.shared?.showSettings()
         }
     }
 

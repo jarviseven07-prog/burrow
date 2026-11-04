@@ -230,6 +230,49 @@ final class AppState {
     func questionQueuePosition(forSession sessionId: String) -> Int {
         (questionQueue.firstIndex { ($0.event.sessionId ?? "default") == sessionId } ?? 0) + 1
     }
+
+    /// "N of M" on a card: where this session's request stands among the
+    /// requests you can still see, and how many those are. A conversation you
+    /// hid, or a question you closed, is not counted: the card said "1/2",
+    /// folded after your answer, and the second never came (health check
+    /// 2026-11-04 #16).
+    struct CardCount: Equatable {
+        let position: Int
+        let total: Int
+    }
+
+    func permissionCardCount(forSession sessionId: String) -> CardCount {
+        let visible = permissionQueue.filter { !dismissedPermissionSessionIds.contains($0.event.sessionId ?? "default") }
+        return Self.cardCount(of: sessionId, in: visible.map { $0.event.sessionId ?? "default" })
+    }
+
+    func questionCardCount(forSession sessionId: String) -> CardCount {
+        let shown = Set(visibleQuestionCards.map { $0.event.sessionId ?? "default" })
+        let visible = questionQueue.map { $0.event.sessionId ?? "default" }.filter(shown.contains)
+        return Self.cardCount(of: sessionId, in: visible)
+    }
+
+    private static func cardCount(of sessionId: String, in visibleSessions: [String]) -> CardCount {
+        let index = visibleSessions.firstIndex(of: sessionId) ?? 0
+        return CardCount(position: index + 1, total: max(visibleSessions.count, index + 1))
+    }
+
+    /// Whether the island is on screen. PanelWindowController hides it over a
+    /// full-screen app; a card shortcut then never acts on a card nobody can
+    /// see (health check 2026-11-04 #17).
+    @ObservationIgnored var isIslandOnScreen = true
+    /// The request whose card a shortcut called up while the island was
+    /// hidden: the island shows over the full-screen app until that request
+    /// is answered or its card put away.
+    var calledUpCardRequestId: UUID?
+
+    /// The card on screen is the one a shortcut called up over a full-screen
+    /// app (PanelWindowController.updateVisibility shows the island for it).
+    var showsCardOverHiddenIsland: Bool {
+        guard let calledUpCardRequestId,
+              surface.approvalSessionId != nil || surface.questionSessionId != nil else { return false }
+        return calledUpCardRequestId == cardRequestId
+    }
     /// Preview-only: mock question payload for DebugHarness (no continuation needed)
     var previewQuestionPayload: QuestionPayload?
     var surface: IslandSurface = .collapsed {
@@ -239,17 +282,12 @@ final class AppState {
                 glanceDismissTask?.cancel()
                 glanceCompletionActive = false
             }
-            // Opening the den (or leaving it) is a look at every conversation:
-            // the embers of failed turns and the sparks of finished ones go out.
-            // The den itself still marks what finished since the look before.
-            if surface == .sessionList, oldValue != .sessionList {
-                denLookBefore = denSeenAt
-            }
-            if surface == .sessionList || oldValue == .sessionList {
-                denSeenAt = Date()
-            }
             // The den always opens on its front; the back closes with it.
-            if surface != .sessionList { denShowsSettings = false }
+            if surface != .sessionList {
+                denShowsSettings = false
+                denPointerInside = false
+            }
+            noteDenFront()
             switch surface {
             case .approvalCard(let sid): cardRequestId = pendingPermission(forSession: sid)?.id
             case .questionCard(let sid): cardRequestId = pendingQuestion(forSession: sid)?.id
@@ -277,15 +315,70 @@ final class AppState {
     var turnDoneAt: [String: Date] = [:]
     /// The den is turned over to its back, Burrow's settings (design/v21).
     /// It stays open when the pointer leaves; a click elsewhere closes it.
-    var denShowsSettings = false
+    var denShowsSettings = false {
+        didSet { noteDenFront() }
+    }
+
+    /// Whether the den's front, its rows, was on screen at the last change.
+    @ObservationIgnored
+    private var denFrontShown = false
+
+    /// The pointer is over the den's rows (BurrowDen's hover, released with
+    /// its order freeze). Only the sweep reads it.
+    @ObservationIgnored
+    var denPointerInside = false
+
+    /// While the pointer is over the open den's rows, a finished row is not
+    /// taken out: the rows under it would move up and a click aimed at one
+    /// would land on another (health check #15). It goes at the first sweep
+    /// after the pointer leaves.
+    var denHoldsItsRows: Bool {
+        denPointerInside && surface == .sessionList && !denShowsSettings
+    }
+
+    /// The den's front coming into view (or leaving it) is a look at every
+    /// conversation: the embers of failed turns and the sparks of finished
+    /// ones go out. The den itself still marks what finished since the look
+    /// before. Only the front counts: settings opened straight onto the back
+    /// (⌘,, the gear on a card) show no rows, so they put nothing out
+    /// (health check #20).
+    private func noteDenFront() {
+        let shown = surface == .sessionList && !denShowsSettings
+        guard shown != denFrontShown else { return }
+        denFrontShown = shown
+        if shown { denLookBefore = denSeenAt }
+        denSeenAt = Date()
+    }
+
+    /// A click elsewhere or the toggle shortcut closing what is open. A
+    /// request the den or its back held — the den holds one while open, and
+    /// the back pushes an open card aside — then opens its card the way it
+    /// would have; before (health check #11) only the pointer leaving did,
+    /// and the agent waited behind a lit pet.
+    func closeIsland(cancellingCompletions: Bool = true) {
+        let wasDen = surface == .sessionList
+        withAnimation(NotchAnimation.close) {
+            surface = .collapsed
+            if cancellingCompletions { cancelCompletionQueue() }
+        }
+        if wasDen { openHeldRequest() }
+    }
+
+    /// After the den closes: a request still waiting, and not hidden by the
+    /// user, opens its card.
+    func openHeldRequest() {
+        guard surface == .collapsed, !visiblePermissionSessionIds.isEmpty || nextVisibleQuestion != nil else { return }
+        withAnimation(NotchAnimation.open) { _ = showNextPending() }
+    }
 
     /// Settings: the den, turned over. The gear, ⌘, and the menu bar item.
+    /// The back is set first, so a den opened for it never shows its front.
     func showSettings() {
+        denShowsSettings = true
         if surface != .sessionList {
             surface = .sessionList
             cancelCompletionQueue()
         }
-        denShowsSettings = true
     }
 
     /// The request the approval / question card on screen was opened for.
@@ -479,6 +572,34 @@ final class AppState {
         now.timeIntervalSince(lastActivity) >= TimeInterval(finishedIdleMinutes * 60)
     }
 
+    /// Whether the sweep takes a finished row out now: past its three
+    /// minutes, and not while the den holds its rows under the pointer.
+    nonisolated static func removesFinishedRow(lastActivity: Date, denHoldsRows: Bool, now: Date = Date()) -> Bool {
+        !denHoldsRows && isStaleIdleSession(lastActivity: lastActivity, now: now)
+    }
+
+    /// How a saved Claude conversation still mid-turn comes back when Burrow
+    /// starts again, however long ago its last hook was: a five-minute test
+    /// sends none until it ends. The three-minute rule used to keep it out
+    /// before this was asked (health check #14).
+    enum RestoredTurn: Equatable {
+        /// A tool is running (the model's last message called it, nothing
+        /// answered): it comes back running that tool, which, with its
+        /// process alive, is never timed out.
+        case tool(String)
+        /// The model is thinking or streaming: within the silent-turn ceiling.
+        case thinking
+    }
+
+    nonisolated static func restoredClaudeTurn(source: String, processAlive: Bool, lastActivity: Date,
+                                               transcriptPath: String?, now: Date = Date()) -> RestoredTurn? {
+        guard source == "claude", processAlive else { return nil }
+        if let tool = claudePendingTool(atPath: transcriptPath) { return .tool(tool) }
+        guard now.timeIntervalSince(lastActivity) <= claudeSilentTurnCeiling,
+              claudeTranscriptTurn(atPath: transcriptPath) == .open else { return nil }
+        return .thinking
+    }
+
     private func cleanupIdleSessions() {
         // 1. Verify monitored PIDs are still alive (DispatchSource can silently miss exits)
         //    Also kill orphaned processes (ppid <= 1, terminal closed but process survived).
@@ -531,7 +652,7 @@ final class AppState {
                 // A silent Claude turn is not a stuck one: ask its transcript.
                 if session.isClaude,
                    session.status == .processing || session.status == .running,
-                   let turn = Self.claudeTranscriptTurn(atPath: session.transcriptPath),
+                   let turn = Self.claudeSweepTurn(session),
                    turn == .open, elapsed <= Self.claudeSilentTurnCeiling {
                     continue
                 }
@@ -557,7 +678,7 @@ final class AppState {
             // the native-app 30s rule below put working sessions to sleep.
             if session.isClaude {
                 if elapsed > nativeAppThinkingTimeout,
-                   let turn = Self.claudeTranscriptTurn(atPath: session.transcriptPath) {
+                   let turn = Self.claudeSweepTurn(session) {
                     if turn == .ended || elapsed > Self.claudeSilentTurnCeiling {
                         sessions[key]?.status = .idle
                     }
@@ -637,9 +758,11 @@ final class AppState {
             requestCodexDesktopDiscoveryScan()
         }
 
-        // 4. Remove finished conversations a few minutes after they finish.
+        // 4. Remove finished conversations a few minutes after they finish —
+        //    once the pointer is off the den's rows.
+        let holdsRows = denHoldsItsRows
         for (key, session) in sessions where session.status == .idle {
-            if Self.isStaleIdleSession(lastActivity: session.lastActivity) {
+            if Self.removesFinishedRow(lastActivity: session.lastActivity, denHoldsRows: holdsRows) {
                 removeSession(key)
             }
         }
@@ -1486,6 +1609,17 @@ final class AppState {
             && (session.toolDescription == nil || session.isClaude)
     }
 
+    /// The turn the sweep weighs for a thinking Claude row. A manual
+    /// /compact runs after the turn before it ended, and the compacting
+    /// agent writes on a side chain, so the transcript reads ended and the
+    /// row showed done after 30 s (health check #12). A row with the
+    /// compacting note is open until PostCompact or SessionStart clears it,
+    /// within the 30-minute ceiling.
+    nonisolated static func claudeSweepTurn(_ session: SessionSnapshot) -> ClaudeTranscriptTurn? {
+        if session.toolDescription == SessionSnapshot.compactingNote { return .open }
+        return claudeTranscriptTurn(atPath: session.transcriptPath)
+    }
+
     func handleEvent(_ event: HookEvent) {
         // Skip events from subagent worktrees — tracked via parent's SubagentStart/Stop
         if let cwd = event.rawJSON["cwd"] as? String,
@@ -1564,10 +1698,16 @@ final class AppState {
         // correlated, and drain queue entries whose agent already moved on.
         cachePreToolUseIfApplicable(event)
         resolveToolUseIfCompleted(event)
-        // #216: permission requests with no correlatable tool_use_id can't be drained by
-        // resolveToolUseIfCompleted. A follow-up activity event means the user already
-        // approved in the terminal — resume those (and only those) as approved.
-        resolveOrphanPermissionsOnActivity(event)
+        let answeredElsewhere = Self.requestAnsweredElsewhere(by: event)
+        if let answeredElsewhere {
+            // OpenCode's reply events name the one request that was answered.
+            resolveRequestAnsweredElsewhere(answeredElsewhere, sessionId: sessionId)
+        } else {
+            // #216: permission requests with no correlatable tool_use_id can't be drained by
+            // resolveToolUseIfCompleted. Their own tool finishing, or the turn ending, means
+            // the user answered in the terminal — let those (and only those) go.
+            resolveOrphanPermissionsOnActivity(event)
+        }
 
         let effects = reduceEvent(sessions: &sessions, event: event, maxHistory: maxHistory,
                                   replyCompletePlaceholder: L10n.shared["reply_complete_placeholder"])
@@ -1601,10 +1741,11 @@ final class AppState {
         if wasWaiting {
             let keepWaiting: Set<String> = ["Notification", "SessionStart", "SessionEnd", "PreCompact"]
             if !keepWaiting.contains(normalizedEventName) {
+                // A reply that names its request has settled that one already.
                 drainQuestions(
                     forSession: sessionId,
                     reason: "wasWaiting-blanket-drain-event=\(normalizedEventName)",
-                    where: { $0.agentId == event.agentId }
+                    where: { answeredElsewhere == nil && $0.agentId == event.agentId }
                 )
                 let stillHasPermission = permissionQueue.contains { $0.event.sessionId == sessionId }
                 let stillHasQuestion = questionQueue.contains { $0.event.sessionId == sessionId }
@@ -1685,7 +1826,11 @@ final class AppState {
         }
     }
 
-    func handlePermissionRequest(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handlePermissionRequest(
+        _ event: HookEvent,
+        connectionId: UUID? = nil,
+        continuation: CheckedContinuation<Data, Never>
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -1722,7 +1867,10 @@ final class AppState {
         // Backfill tool name/description from cached PreToolUse when the payload is thin.
         enrichPermissionRequestFromCache(sessionId: sessionId, event: event)
 
-        let request = PermissionRequest(event: event, continuation: continuation)
+        let request = PermissionRequest(
+            event: event, continuation: continuation, toolUseId: correlatedToolUseId(for: event),
+            connectionId: connectionId
+        )
 
         // Replay deduplication: if the same tool_use_id is already queued, swap the
         // continuation in place and deny the previous waiter. Preserves card order.
@@ -1968,6 +2116,7 @@ final class AppState {
         let sessionId = pending.event.sessionId ?? "default"
         PetReactionCenter.shared.permissionClosed(requestId: pending.id)
         dismissedPermissionSessionIds.remove(sessionId)
+        forgetToolUse(of: pending)
         let response = #"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#
         pending.continuation.resume(returning: Data(response.utf8))
         // Folded Task deny must not idle the whole parent chat card.
@@ -2011,7 +2160,11 @@ final class AppState {
         refreshDerivedState()
     }
 
-    func handleQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handleQuestion(
+        _ event: HookEvent,
+        connectionId: UUID? = nil,
+        continuation: CheckedContinuation<Data, Never>
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -2038,7 +2191,8 @@ final class AppState {
         sessions[sessionId]?.lastActivity = Date()
         markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
 
-        let request = QuestionRequest(event: event, question: question, continuation: continuation)
+        var request = QuestionRequest(event: event, question: question, continuation: continuation)
+        request.connectionId = connectionId
         questionQueue.append(request)
 
         // First of a burst: nothing else visibly waiting. Not `count == 1` —
@@ -2056,7 +2210,11 @@ final class AppState {
         refreshDerivedState()
     }
 
-    func handleAskUserQuestion(_ event: HookEvent, continuation: CheckedContinuation<Data, Never>) {
+    func handleAskUserQuestion(
+        _ event: HookEvent,
+        connectionId: UUID? = nil,
+        continuation: CheckedContinuation<Data, Never>
+    ) {
         let sessionId = event.sessionId ?? "default"
         if sessions[sessionId] == nil {
             sessions[sessionId] = SessionSnapshot()
@@ -2160,13 +2318,14 @@ final class AppState {
         markMergedSubagentWaiting(sessionId: sessionId, agentId: event.agentId, status: .waitingQuestion)
 
         let askState = AskUserQuestionState(items: askItems, answers: [:])
-        let request = QuestionRequest(
+        var request = QuestionRequest(
             event: event,
             question: askItems[0].payload,
             continuation: continuation,
             isFromPermission: true,
             askUserQuestionState: askState
         )
+        request.connectionId = connectionId
         questionQueue.append(request)
 
         // First of a burst, as in `handleQuestion`.
@@ -2468,13 +2627,22 @@ final class AppState {
     private func drainPermissions(
         forSession sessionId: String,
         reason: String = "unknown",
-        where matches: (HookEvent) -> Bool = { _ in true }
+        where matches: (HookEvent) -> Bool = { _ in true },
+        connection: UUID? = nil
     ) {
-        dismissedPermissionSessionIds.remove(sessionId)
         let denyResponse = Data(#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}"#.utf8)
+        defer {
+            // A hidden conversation stays hidden while it still has a request
+            // queued (one socket of several closing, another agent's request).
+            if !permissionQueue.contains(where: { $0.event.sessionId == sessionId }) {
+                dismissedPermissionSessionIds.remove(sessionId)
+            }
+        }
         permissionQueue.removeAll { item in
-            guard item.event.sessionId == sessionId, matches(item.event) else { return false }
+            guard item.event.sessionId == sessionId, matches(item.event),
+                  connection == nil || item.connectionId == connection else { return false }
             log.notice("⚠️ permission deny reason=drainPermissions(\(reason, privacy: .public)) session=\(sessionId, privacy: .public) toolUseId=\(item.toolUseId ?? "nil", privacy: .public) tool=\(item.event.toolName ?? "nil", privacy: .public)")
+            forgetToolUse(of: item)
             item.continuation.resume(returning: denyResponse)
             return true
         }
@@ -2483,14 +2651,18 @@ final class AppState {
     /// Called when the bridge socket disconnects — the question/permission was answered externally (e.g. user replied in terminal).
     /// Only the disconnecting agent's requests are drained: the socket belonged to one agent,
     /// and another agent's request in the same session is still waiting on the user.
-    func handlePeerDisconnect(sessionId: String, agentId: String? = nil) {
+    /// HookServer passes the socket's `connectionId`, and then only the request that
+    /// socket carried goes: the same agent can have another request waiting on its own
+    /// socket, still open, which a group drain denied for real (health check 2026-11-04 #6).
+    func handlePeerDisconnect(sessionId: String, agentId: String? = nil, connectionId: UUID? = nil) {
         let sameAgent: (HookEvent) -> Bool = { $0.sessionId == sessionId && $0.agentId == agentId }
-        let hadPending = questionQueue.contains(where: { sameAgent($0.event) })
-            || permissionQueue.contains(where: { sameAgent($0.event) })
+        let onSocket: (UUID?) -> Bool = { connectionId == nil || $0 == connectionId }
+        let hadPending = questionQueue.contains(where: { sameAgent($0.event) && onSocket($0.connectionId) })
+            || permissionQueue.contains(where: { sameAgent($0.event) && onSocket($0.connectionId) })
         guard hadPending else { return }
 
-        drainQuestions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent)
-        drainPermissions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent)
+        drainQuestions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent, connection: connectionId)
+        drainPermissions(forSession: sessionId, reason: "peer-disconnect", where: sameAgent, connection: connectionId)
         let currentStatus = sessions[sessionId]?.status
         let wasWaiting = currentStatus == .waitingApproval || currentStatus == .waitingQuestion
         if wasWaiting, permissionQueue.contains(where: { $0.event.sessionId == sessionId }) {
@@ -2511,10 +2683,12 @@ final class AppState {
     private func drainQuestions(
         forSession sessionId: String,
         reason: String = "unknown",
-        where matches: (HookEvent) -> Bool = { _ in true }
+        where matches: (HookEvent) -> Bool = { _ in true },
+        connection: UUID? = nil
     ) {
         questionQueue.removeAll { item in
-            guard item.event.sessionId == sessionId, matches(item.event) else { return false }
+            guard item.event.sessionId == sessionId, matches(item.event),
+                  connection == nil || item.connectionId == connection else { return false }
             if item.isCodexAppServer {
                 // Abandon the Codex app-server request so the server stops waiting.
                 item.resolveCodexAppServer(nil)
@@ -2835,9 +3009,12 @@ final class AppState {
             let liveProcess = p.cliPid
                 .flatMap { $0 > 0 ? ProcessIdentity(pid: $0, startTime: p.cliStartTime) : nil }
                 .flatMap { Self.isLiveProcess($0) ? $0 : nil }
-            // Restored cards are idle: one the sweep would take at once stays out.
-            guard !Self.isStaleIdleSession(lastActivity: p.lastActivity) else { continue }
             guard let source = SessionSnapshot.normalizedSupportedSource(p.source) else { continue }
+            // Restored cards are idle: one the sweep would take at once stays
+            // out — unless it is a Claude turn still under way, asked first.
+            let midTurn = Self.restoredClaudeTurn(source: source, processAlive: liveProcess != nil,
+                                                  lastActivity: p.lastActivity, transcriptPath: p.transcriptPath)
+            guard midTurn != nil || !Self.isStaleIdleSession(lastActivity: p.lastActivity) else { continue }
             let restoredSessionId = Self.canonicalRestoredCodexSessionId(
                 sessionId: p.sessionId,
                 source: source,
@@ -2893,9 +3070,14 @@ final class AppState {
             // Burrow restarted came back idle and stayed asleep until its next
             // hook — minutes, for a big Write. Its live process and an open
             // transcript say it is still working.
-            if snapshot.isClaude, snapshot.cliPid != nil,
-               Self.claudeTranscriptTurn(atPath: snapshot.transcriptPath) == .open {
+            switch midTurn {
+            case .tool(let tool):
+                snapshot.status = .running
+                snapshot.currentTool = tool
+            case .thinking:
                 snapshot.status = .processing
+            case nil:
+                break
             }
             // Skip sessions whose process is dead and status was idle — nothing to show.
             if snapshot.cliPid == nil && snapshot.status == .idle && snapshot.lastUserPrompt == nil {

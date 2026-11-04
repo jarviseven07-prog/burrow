@@ -9,6 +9,8 @@ import CodeIslandCore
 /// sight — auto-expand is off, Smart Suppress held it back, a completion
 /// card or the session list is showing — the press only opens its card; the
 /// next press acts on it. With nothing of that kind waiting it does nothing.
+/// The same holds while the whole island is hidden over a full-screen app:
+/// the press calls the card up over it, and only the next one acts.
 extension AppState {
     enum CardShortcutOutcome: Equatable {
         /// Resolved the request on the card for this session.
@@ -24,6 +26,7 @@ extension AppState {
         case .approve, .approveAlways, .deny:
             let visible = visiblePermissionSessionIds
             if let sid = surface.approvalSessionId, visible.contains(sid) {
+                guard isIslandOnScreen else { return callUpOverHiddenIsland(.approvalCard(sessionId: sid)) }
                 // The card hides "always allow" for a command that can't be
                 // taken back; its shortcut can't reach around it.
                 if action == .approveAlways, let event = pendingPermission(forSession: sid)?.event,
@@ -46,10 +49,12 @@ extension AppState {
                 return .ignored
             }
             openPendingApprovalCard(sessionId: sid)
+            if !isIslandOnScreen { return callUpOverHiddenIsland(.approvalCard(sessionId: sid)) }
             return .opened(.approvalCard(sessionId: sid))
 
         case .skipQuestion:
             if let sid = surface.questionSessionId, pendingQuestion(forSession: sid) != nil {
+                guard isIslandOnScreen else { return callUpOverHiddenIsland(.questionCard(sessionId: sid)) }
                 skipQuestion(expectedSessionId: sid)
                 return .acted(sessionId: sid)
             }
@@ -60,6 +65,7 @@ extension AppState {
             }
             let sid = head.event.sessionId ?? "default"
             openPendingQuestionCard(sessionId: sid)
+            if !isIslandOnScreen { return callUpOverHiddenIsland(.questionCard(sessionId: sid)) }
             return .opened(.questionCard(sessionId: sid))
 
         case .togglePanel, .jumpToTerminal:
@@ -76,6 +82,17 @@ extension AppState {
         withAnimation(NotchAnimation.open) {
             surface = .approvalCard(sessionId: sessionId)
         }
+    }
+
+    /// The island is hidden over a full-screen app: show this card over it
+    /// instead of acting on it unseen (health check 2026-11-04 #17).
+    private func callUpOverHiddenIsland(_ card: IslandSurface) -> CardShortcutOutcome {
+        switch card {
+        case .approvalCard(let sid): calledUpCardRequestId = pendingPermission(forSession: sid)?.id
+        case .questionCard(let sid): calledUpCardRequestId = pendingQuestion(forSession: sid)?.id
+        default: break
+        }
+        return .opened(card)
     }
 
     /// A card whose request is gone can only swallow the press; let the

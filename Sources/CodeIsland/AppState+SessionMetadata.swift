@@ -195,40 +195,166 @@ extension AppState {
     /// crash mid-stream leaves the last line a tool result forever.
     nonisolated static let claudeSilentTurnCeiling: TimeInterval = 30 * 60
 
-    nonisolated static func claudeTranscriptTurn(atPath path: String?, maxBytes: Int = 64 * 1024) -> ClaudeTranscriptTurn? {
-        guard let path, !path.isEmpty else { return nil }
-        return readTranscriptTailData(path: path, maxBytes: maxBytes).flatMap(claudeTranscriptTurn(tail:))
+    /// The turn by the transcript's last line that says, read back from the
+    /// end a piece at a time (health check #9). Claude Code writes its own
+    /// bookkeeping after every request — `api-request-blob` lines of up to
+    /// ~300 KB and more — so a fixed 64 KB tail often held no message at
+    /// all, and a working turn fell back to the five-minute rule. Bookkeeping
+    /// lines are skipped without parsing. Nil when the file is missing or
+    /// holds no message; `.open` when `budget` bytes hold none, so a turn
+    /// too busy to tell still gets the 30-minute ceiling, not five minutes.
+    /// An unchanged file is not read again.
+    nonisolated static func claudeTranscriptTurn(atPath path: String?, budget: Int = 8 * 1024 * 1024) -> ClaudeTranscriptTurn? {
+        guard let path, !path.isEmpty, let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        if let known = ClaudeTurnCache.shared.turn(path: path, size: size) { return known }
+        let turn = claudeTranscriptTurn(size: size, budget: budget) { offset, length in
+            guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
+            return try? handle.read(upToCount: length)
+        }
+        ClaudeTurnCache.shared.store(turn, path: path, size: size)
+        return turn
+    }
+
+    /// `read(offset, length)` gives the file's bytes; lines are judged last
+    /// first, each piece read joined to the cut line it ends in.
+    nonisolated static func claudeTranscriptTurn(size: UInt64, piece: Int = 64 * 1024, budget: Int,
+                                                 read: (UInt64, Int) -> Data?) -> ClaudeTranscriptTurn? {
+        switch lastClaudeLine(size: size, piece: piece, budget: budget, read: read, judge: claudeTurn(line:)) {
+        case .found(let turn): return turn
+        case .none: return nil
+        case .budgetSpent: return .open
+        }
+    }
+
+    /// The tool a Claude turn is running, by its transcript: a `tool_use`
+    /// in this turn that no `tool_result` has answered yet. Nil for anything
+    /// else, a missing file, or no answer within `budget`.
+    nonisolated static func claudePendingTool(atPath path: String?, budget: Int = 8 * 1024 * 1024) -> String? {
+        guard let path, !path.isEmpty, let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return nil }
+        var answered = Set<String>()
+        let found = lastClaudeLine(size: size, budget: budget, read: { offset, length in
+            guard (try? handle.seek(toOffset: offset)) != nil else { return nil }
+            return try? handle.read(upToCount: length)
+        }, judge: { claudePendingTool(line: $0, answered: &answered) })
+        guard case .found(let tool) = found else { return nil }
+        return tool
+    }
+
+    /// What one line says about a running tool, read last first:
+    /// `.some(name)` for a tool call nothing has answered, `.some(nil)` where
+    /// the search ends (the prompt that began the turn, an interrupt, a
+    /// finished reply), nil to read on. Parallel calls are one line each and
+    /// are answered as each one finishes, so results seen on the way are
+    /// kept in `answered` (review of #14).
+    private nonisolated static func claudePendingTool(line: Data.SubSequence,
+                                                      answered: inout Set<String>) -> String?? {
+        guard let turn = claudeTurn(line: line),
+              let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
+        if turn == .ended { return .some(nil) }
+        let blocks = (object["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+        switch object["type"] as? String {
+        case "user":
+            let results = blocks.filter { $0["type"] as? String == "tool_result" }
+            guard !results.isEmpty else { return .some(nil) }
+            for result in results {
+                if let id = result["tool_use_id"] as? String { answered.insert(id) }
+            }
+            return nil
+        case "assistant":
+            for call in blocks.reversed() where call["type"] as? String == "tool_use" {
+                if let id = call["id"] as? String, answered.contains(id) { continue }
+                return .some(call["name"] as? String ?? "Tool")
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    enum BackwardScan<T> { case found(T), none, budgetSpent }
+
+    /// The last line `judge` has an answer for, read back from the end.
+    nonisolated static func lastClaudeLine<T>(size: UInt64, piece: Int = 64 * 1024, budget: Int,
+                                              read: (UInt64, Int) -> Data?,
+                                              judge: (Data.SubSequence) -> T?) -> BackwardScan<T> {
+        var start = size
+        var pending = Data()
+        var spent = 0
+        while start > 0 {
+            guard spent < budget else { return .budgetSpent }
+            let length = Int(min(UInt64(piece), start))
+            start -= UInt64(length)
+            guard let data = read(start, length), data.count == length else { return .none }
+            spent += length
+            pending = data + pending
+            // Before the first newline is the end of a line that starts in
+            // an earlier piece — unless this piece starts the file.
+            let firstComplete: Data.Index
+            if start == 0 {
+                firstComplete = pending.startIndex
+            } else if let newline = pending.firstIndex(of: 0x0A) {
+                firstComplete = pending.index(after: newline)
+            } else {
+                continue
+            }
+            for line in pending[firstComplete...].split(separator: 0x0A).reversed() {
+                if let answer = judge(line) { return .found(answer) }
+            }
+            pending = start == 0 ? Data() : Data(pending[..<pending.index(before: firstComplete)])
+        }
+        return .none
     }
 
     nonisolated static func claudeTranscriptTurn(tail: Data) -> ClaudeTranscriptTurn? {
+        // The first line of a tail read may be cut mid-record; it fails to parse and is skipped.
         for line in tail.split(separator: UInt8(ascii: "\n")).reversed() {
-            // The first line of a tail read may be cut mid-record; it fails to parse and is skipped.
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                  object["isSidechain"] as? Bool != true,
-                  object["isMeta"] as? Bool != true else { continue }
-            let message = object["message"] as? [String: Any]
-            switch object["type"] as? String {
-            case "assistant":
-                if object["isApiErrorMessage"] as? Bool == true { return .ended }
-                switch message?["stop_reason"] as? String {
-                case "end_turn", "stop_sequence", "refusal": return .ended
-                default: return .open
-                }
-            case "user":
-                let texts: [String]
-                if let text = message?["content"] as? String {
-                    texts = [text]
-                } else if let blocks = message?["content"] as? [[String: Any]] {
-                    texts = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
-                } else {
-                    texts = []
-                }
-                return texts.contains { $0.hasPrefix("[Request interrupted") } ? .ended : .open
-            default:
-                continue
-            }
+            if let turn = claudeTurn(line: line) { return turn }
         }
         return nil
+    }
+
+    /// What one line says about the turn; nil for a line that says nothing
+    /// (bookkeeping, a side chain, a meta message, a cut line).
+    private nonisolated static func claudeTurn(line: Data.SubSequence) -> ClaudeTranscriptTurn? {
+        if isClaudeBookkeepingLine(line) { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+              object["isSidechain"] as? Bool != true,
+              object["isMeta"] as? Bool != true else { return nil }
+        let message = object["message"] as? [String: Any]
+        switch object["type"] as? String {
+        case "assistant":
+            if object["isApiErrorMessage"] as? Bool == true { return .ended }
+            switch message?["stop_reason"] as? String {
+            case "end_turn", "stop_sequence", "refusal": return .ended
+            default: return .open
+            }
+        case "user":
+            let texts: [String]
+            if let text = message?["content"] as? String {
+                texts = [text]
+            } else if let blocks = message?["content"] as? [[String: Any]] {
+                texts = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            } else {
+                texts = []
+            }
+            return texts.contains { $0.hasPrefix("[Request interrupted") } ? .ended : .open
+        default:
+            return nil
+        }
+    }
+
+    /// Claude Code's bookkeeping lines start with their type
+    /// (`{"type":"api-request-blob",…`); messages start with `parentUuid`.
+    /// Told apart from the first bytes, so a 300 KB blob is never parsed.
+    nonisolated static func isClaudeBookkeepingLine(_ line: Data.SubSequence) -> Bool {
+        let prefix = Data(#"{"type":""#.utf8)
+        guard line.starts(with: prefix) else { return false }
+        let rest = line.dropFirst(prefix.count)
+        return !rest.starts(with: Data(#"user""#.utf8)) && !rest.starts(with: Data(#"assistant""#.utf8))
     }
 
     private nonisolated static func readTranscriptTailData(path: String, maxBytes: Int) -> Data? {
@@ -238,5 +364,26 @@ extension AppState {
         let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
         guard (try? handle.seek(toOffset: start)) != nil else { return nil }
         return try? handle.readToEnd()
+    }
+}
+
+/// The last answer `claudeTranscriptTurn(atPath:)` gave per transcript and
+/// the size it was read at. The sweep asks every three seconds about a turn
+/// that is silent — a file that has not changed.
+final class ClaudeTurnCache: @unchecked Sendable {
+    static let shared = ClaudeTurnCache()
+    private let lock = NSLock()
+    private var entries: [String: (size: UInt64, turn: AppState.ClaudeTranscriptTurn?)] = [:]
+
+    func turn(path: String, size: UInt64) -> AppState.ClaudeTranscriptTurn?? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = entries[path], entry.size == size else { return nil }
+        return .some(entry.turn)
+    }
+
+    func store(_ turn: AppState.ClaudeTranscriptTurn?, path: String, size: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        if entries.count > 256 { entries.removeAll() }
+        entries[path] = (size, turn)
     }
 }

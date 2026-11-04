@@ -84,41 +84,37 @@ enum SessionTitleStore {
 
         let projectDir = cwd.claudeProjectDirEncoded()
         // The transcript sits under whichever config dir (account) ran it.
-        guard let path = ClaudeConfigPaths.transcriptPath(projectDir: projectDir, sessionId: sessionId),
-              let handle = FileHandle(forReadingAtPath: path) else {
+        guard let path = ClaudeConfigPaths.transcriptPath(projectDir: projectDir, sessionId: sessionId) else {
             return nil
         }
-        defer { handle.closeFile() }
+        return ClaudeTranscriptTitleCache.shared.title(path: path)
+    }
 
-        let fileSize = handle.seekToEndOfFile()
-        let readSize: UInt64 = min(fileSize, 65536)
+    /// The title in a transcript's first and last pieces: a custom title
+    /// (the user's) before an AI one, the tail's before the head's. The
+    /// pieces are decoded leniently (health check #5): a cut through a
+    /// multi-byte character only spoils the cut line, which never parses
+    /// anyway, instead of the whole piece.
+    static func claudeTitle(head: Data, tail: Data) -> ResolvedSessionTitle? {
+        resolved(claudeTitles(head: head, tail: tail))
+    }
 
-        handle.seek(toFileOffset: 0)
-        let headData = handle.readData(ofLength: Int(readSize))
+    static func claudeTitles(head: Data, tail: Data) -> (custom: String?, ai: String?) {
+        let pieces = claudeTitlePieces(head: head, tail: tail)
+        return (pieces.tail.custom ?? pieces.head.custom, pieces.tail.ai ?? pieces.head.ai)
+    }
 
-        let tailData: Data
-        if fileSize > readSize {
-            handle.seek(toFileOffset: fileSize - readSize)
-            tailData = handle.readDataToEndOfFile()
-        } else {
-            tailData = headData
-        }
+    /// Each piece's latest titles, kept apart: the head is the oldest part
+    /// of the file, so a title found there is older than any found before.
+    static func claudeTitlePieces(head: Data, tail: Data)
+        -> (head: (custom: String?, ai: String?), tail: (custom: String?, ai: String?)) {
+        (latestClaudeTitles(in: String(decoding: head, as: UTF8.self)),
+         latestClaudeTitles(in: String(decoding: tail, as: UTF8.self)))
+    }
 
-        guard let head = String(data: headData, encoding: .utf8),
-              let tail = String(data: tailData, encoding: .utf8)
-        else {
-            return nil
-        }
-
-        let tailTitles = latestClaudeTitles(in: tail)
-        let headTitles = latestClaudeTitles(in: head)
-
-        if let customTitle = tailTitles.custom ?? headTitles.custom {
-            return ResolvedSessionTitle(title: customTitle, source: .claudeCustomTitle)
-        }
-        if let aiTitle = tailTitles.ai ?? headTitles.ai {
-            return ResolvedSessionTitle(title: aiTitle, source: .claudeAiTitle)
-        }
+    static func resolved(_ titles: (custom: String?, ai: String?)) -> ResolvedSessionTitle? {
+        if let custom = titles.custom { return ResolvedSessionTitle(title: custom, source: .claudeCustomTitle) }
+        if let ai = titles.ai { return ResolvedSessionTitle(title: ai, source: .claudeAiTitle) }
         return nil
     }
 
@@ -155,6 +151,61 @@ enum SessionTitleStore {
         guard let raw = value as? String else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Titles read from Claude transcripts (health check #5). Every hook event
+/// asks, on the main thread, so a file that has not changed is not read
+/// again. A transcript only grows: a title found once is kept while the
+/// title line is out of both pieces read, until a newer one turns up or the
+/// file shrinks (a new file under the same name).
+final class ClaudeTranscriptTitleCache: @unchecked Sendable {
+    static let shared = ClaudeTranscriptTitleCache()
+
+    private struct Entry {
+        var size: UInt64
+        var modified: Date?
+        var custom: String?
+        var ai: String?
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private let window: Int
+
+    /// `window`: how much of the head and of the tail is read.
+    init(window: Int = 64 * 1024) { self.window = window }
+
+    func title(path: String) -> ResolvedSessionTitle? {
+        lock.lock(); defer { lock.unlock() }
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attributes[.size] as? NSNumber)?.uint64Value else {
+            entries[path] = nil
+            return nil
+        }
+        let modified = attributes[.modificationDate] as? Date
+        let known = entries[path]
+        if let known, known.size == size, known.modified == modified {
+            return SessionTitleStore.resolved((known.custom, known.ai))
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let piece = UInt64(window)
+        let head = (try? handle.read(upToCount: window)) ?? Data()
+        var tail = head
+        if size > piece, (try? handle.seek(toOffset: size - piece)) != nil {
+            tail = (try? handle.readToEnd()) ?? Data()
+        }
+        let found = SessionTitleStore.claudeTitlePieces(head: head, tail: tail)
+        let kept = known.flatMap { $0.size <= size ? $0 : nil }
+        if entries.count > 512 { entries.removeAll() }
+        // Newest first: the tail, then what was found before (from a tail
+        // or head that is at least as new as this head), then the head.
+        let entry = Entry(size: size, modified: modified,
+                          custom: found.tail.custom ?? kept?.custom ?? found.head.custom,
+                          ai: found.tail.ai ?? kept?.ai ?? found.head.ai)
+        entries[path] = entry
+        return SessionTitleStore.resolved((entry.custom, entry.ai))
     }
 }
 

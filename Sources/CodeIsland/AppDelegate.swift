@@ -16,7 +16,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var localShortcutMonitor: Any?
     let appState = AppState()
 
+    /// Burrow's delegate. Under SwiftUI's `@NSApplicationDelegateAdaptor`,
+    /// `NSApp.delegate` is SwiftUI's own wrapper, so `NSApp.delegate as?
+    /// AppDelegate` is always nil (checked 2026-11-04 with a probe app) —
+    /// calls made through it never arrived.
+    private(set) static weak var shared: AppDelegate?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.shared = self
         // Read before anything else: the launch Apple Event that says "login
         // item" is only current during this synchronous call.
         let isLoginLaunch = LaunchContext.isCurrentLaunchAtLogin()
@@ -171,6 +178,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Burrow's own shortcuts go off while one is recorded on the den's
+    /// back, or a combination already in use fires (the Carbon hot key is
+    /// taken before the recorder sees the key) instead of being recorded
+    /// (health check #24). `setupGlobalShortcut()` puts them back.
+    func suspendGlobalShortcuts() {
+        teardownGlobalShortcut()
+    }
+
     private func teardownGlobalShortcut() {
         hotKeyManager.unregisterAll()
         if let m = localShortcutMonitor { NSEvent.removeMonitor(m) }
@@ -205,7 +220,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .togglePanel:
             if appState.surface.isExpanded {
-                withAnimation(NotchAnimation.close) { appState.surface = .collapsed }
+                appState.closeIsland(cancellingCompletions: false)
             } else {
                 withAnimation(NotchAnimation.open) {
                     appState.surface = .sessionList

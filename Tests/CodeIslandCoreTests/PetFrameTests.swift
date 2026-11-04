@@ -29,15 +29,27 @@ final class PetFrameTests: XCTestCase {
     func testEveryStateRendersInsideTheCanvasOverALoop() {
         for species in PetSpecies.allCases {
             for state in PetState.allCases {
-                for i in 0..<120 {
-                    let px = PetFrame.pixels(sprite: species.sprite, state: state, t: Double(i) * 0.1)
-                    XCTAssertFalse(px.isEmpty, "\(species) \(state)")
-                    for p in px {
-                        XCTAssert((0..<PetFrame.canvasWidth).contains(p.x))
-                        XCTAssert((0..<PetFrame.canvasHeight).contains(p.y))
+                for work in [nil] + PetWork.allCases.map(Optional.some) {
+                    for i in 0..<120 {
+                        let px = PetFrame.pixels(sprite: species.sprite, state: state, t: Double(i) * 0.1, work: work)
+                        XCTAssertFalse(px.isEmpty, "\(species) \(state)")
+                        for p in px {
+                            XCTAssert((0..<PetFrame.canvasWidth).contains(p.x))
+                            XCTAssert((0..<PetFrame.canvasHeight).contains(p.y))
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// The waist — the row a squash drops and a stretch repeats — is a plain
+    /// body row under the face, so the face always moves as one.
+    func testTheWaistIsUnderTheFace() {
+        for species in PetSpecies.allCases {
+            let sprite = species.sprite
+            XCTAssertGreaterThan(sprite.waist, sprite.eyeBottom, "\(species)")
+            XCTAssertLessThan(sprite.waist, sprite.bodyBottom, "\(species)")
         }
     }
 
@@ -51,7 +63,9 @@ final class PetFrameTests: XCTestCase {
                 .map(\.y))
         }
         XCTAssertEqual(eyeRows(.idle), [10, 11])
-        XCTAssertEqual(eyeRows(.sleep), [11])
+        // Asleep, the top half sinks a row on the out-breath.
+        XCTAssertEqual(eyeRows(.sleep), [12])
+        XCTAssertEqual(eyeRows(.sleep, t: 1.3), [11])
         XCTAssertEqual(eyeRows(.heart), [10])
     }
 
@@ -62,6 +76,12 @@ final class PetFrameTests: XCTestCase {
                 PetFrame.pixels(sprite: sprite, state: state, t: Double(i) * 0.1).map { "\($0.x),\($0.y),\($0.rgb)" }.joined(separator: ";")
             })
             XCTAssertGreaterThan(frames.count, 1, "\(state) never moves")
+        }
+        for work in PetWork.allCases {
+            let frames = Set((0..<60).map { i in
+                PetFrame.pixels(sprite: sprite, state: .busy, t: Double(i) * 0.1, work: work).map { "\($0.x),\($0.y),\($0.rgb)" }.joined(separator: ";")
+            })
+            XCTAssertGreaterThan(frames.count, 1, "\(work) never moves")
         }
     }
 }
@@ -116,49 +136,74 @@ final class PetLifeTests: XCTestCase {
         XCTAssertEqual(Set(xs.map { $0 < 8 }).count, 2, "one dash per eye")
     }
 
-    /// Busy is typing at a little laptop by its side: the whole pet shows,
-    /// the laptop is to its right, its eyes are on the screen, its paw taps,
-    /// and code appears on the screen as time goes on.
-    func testBusyPetTypesAtALaptopBesideIt() {
+    /// Busy, the pet steps two cells aside and works at its craft on the
+    /// right: every craft reads differently, and none covers the pet's face.
+    func testEachCraftIsItsOwnAndBesideThePet() {
         for species in PetSpecies.allCases {
             let sprite = species.sprite
             let body = sprite.palette["B"]!
-            let frame = PetFrame.pixels(sprite: sprite, state: .busy, t: 0.02)
-            let bodyXs = frame.filter { $0.rgb == body }.map(\.x)
-            let lidXs = frame.filter { $0.rgb == 0xAEB5C2 }.map(\.x)
-            XCTAssertFalse(lidXs.isEmpty, "\(species): no laptop")
-            XCTAssertGreaterThanOrEqual(lidXs.min()!, 15, "\(species): the laptop sits right of the pet")
-            // The screen's edge may touch an arm tip, nothing more.
-            let resting = PetFrame.pixels(sprite: sprite, state: .idle, t: 0).filter { $0.rgb == body }.count
-            XCTAssertGreaterThanOrEqual(bodyXs.count, resting - 4, "\(species): the laptop covers the pet")
             let restingXs = PetFrame.pixels(sprite: sprite, state: .idle, t: 0).filter { $0.rgb == body }.map(\.x)
-            XCTAssertEqual(bodyXs.min()!, restingXs.min()! - 2, "\(species): stepped left to make room")
-
-            // The paw goes up and down between keystrokes.
-            let paw = body.darkenedForTest(by: 0.28)
-            let pawRows = Set([0.02, 0.11].map { t in
-                PetFrame.pixels(sprite: sprite, state: .busy, t: t).filter { $0.rgb == paw && $0.x == 13 }.map(\.y)
-            })
-            XCTAssertEqual(pawRows.count, 2, "\(species): the paw doesn't tap")
-
-            // More code on the screen later on.
-            func code(_ t: Double) -> Int {
-                PetFrame.pixels(sprite: sprite, state: .busy, t: t)
-                    .filter { $0.x >= 16 && $0.x <= 18 && [0x7FD8FF, 0xF5B764, 0x6BE3B0, 0xC9C3BA, 0xFF8FA8].contains($0.rgb) }.count
+            var loops = Set<String>()
+            for work in PetWork.allCases {
+                let loop = (0..<48).map { i in
+                    PetFrame.pixels(sprite: sprite, state: .busy, t: Double(i) * 0.1, work: work)
+                        .map { "\($0.x),\($0.y),\($0.rgb)" }.joined(separator: ";")
+                }.joined(separator: "|")
+                loops.insert(loop)
+                // Digging leans in from the waist; the rest stand straight.
+                guard work != .search else { continue }
+                let bodyXs = PetFrame.pixels(sprite: sprite, state: .busy, t: 0.1, work: work).filter { $0.rgb == body }.map(\.x)
+                XCTAssertEqual(bodyXs.min(), restingXs.min()! - 2, "\(species) \(work): stepped aside to make room")
             }
-            XCTAssertGreaterThan(code(2.0), code(0.02), "\(species): nothing gets typed")
+            XCTAssertEqual(loops.count, PetWork.allCases.count, "\(species): two crafts look the same")
         }
+    }
+
+    /// The firefly drifts round its head and its eyes follow it.
+    func testThinkingEyesFollowTheFirefly() {
+        let sprite = PetSpecies.clawd.sprite
+        let eye = sprite.palette["E"]!
+        func eyeXs(_ t: Double) -> Int {
+            PetFrame.pixels(sprite: sprite, state: .busy, t: t, work: .think).filter { $0.rgb == eye }.map(\.x).reduce(0, +)
+        }
+        // A quarter of the way round it is on the right, three quarters on the left.
+        XCTAssertGreaterThan(eyeXs(1.2), eyeXs(3.6))
+        let top = sprite.bodyTop + PetFrame.originY
+        let above = PetFrame.pixels(sprite: sprite, state: .busy, t: 0, work: .think).filter { $0.y < top }
+        XCTAssertFalse(above.isEmpty, "the firefly flies above its head")
+    }
+
+    /// Building, the wall goes up a brick at a time and starts over.
+    func testEditingBuildsAWallBrickByBrick() {
+        let sprite = PetSpecies.clawd.sprite
+        func bricks(_ t: Double) -> Int {
+            PetFrame.pixels(sprite: sprite, state: .busy, t: t, work: .edit)
+                .filter { [0xFFD84D, 0xC9A23A].contains($0.rgb) }.count
+        }
+        // Late in each beat the carried brick is down: only the wall shows.
+        XCTAssertEqual([0.65, 0.7 + 0.65, 0.7 * 3 + 0.65, 0.7 * 6 + 0.65].map(bricks), [0, 2, 6, 0])
+    }
+
+    /// The machine's lamp is dark until the lever is pulled, then green.
+    func testRunningACommandLightsTheLamp() {
+        let sprite = PetSpecies.clawd.sprite
+        func has(_ rgb: UInt32, _ t: Double) -> Bool {
+            PetFrame.pixels(sprite: sprite, state: .busy, t: t, work: .shell).contains { $0.rgb == rgb }
+        }
+        XCTAssertTrue(has(0x2E4A2C, 0.2), "the lamp is off before the pull")
+        XCTAssertTrue(has(0x8FCF89, 0.6), "the lamp is on after the pull")
+        XCTAssertFalse(has(0x2E4A2C, 0.6))
     }
 
     /// Codex's face is a screen (design/v18/v04, after the official Codex
     /// pet): its eyes are a lit glyph — >_ awake, v v asleep, ^ ^ happy,
-    /// x x hurt — and while it works the cursor blinks.
+    /// x x hurt — and reading, the >_ drops a row to look down.
     func testCodexScreenFaceChangesWithItsMood() {
         let sprite = PetSpecies.codex.sprite
         let face = try! XCTUnwrap(sprite.screenFace)
         let lit = sprite.palette["E"]!
-        func glyph(_ state: PetState, _ t: Double) -> Set<String> {
-            Set(PetFrame.pixels(sprite: sprite, state: state, t: t).filter { $0.rgb == lit }.map { "\($0.x),\($0.y)" })
+        func glyph(_ state: PetState, _ t: Double, work: PetWork? = nil) -> Set<String> {
+            Set(PetFrame.pixels(sprite: sprite, state: state, t: t, work: work).filter { $0.rgb == lit }.map { "\($0.x),\($0.y)" })
         }
         let awake = glyph(.idle, 0), asleep = glyph(.sleep, 0), happy = glyph(.heart, 0.6), hurt = glyph(.dizzy, 0.1)
         XCTAssertEqual(Set([awake, asleep, happy, hurt]).count, 4, "every mood reads differently")
@@ -170,22 +215,25 @@ final class PetLifeTests: XCTestCase {
             .filter { $0.rgb == screen }.map { "\($0.x),\($0.y)" })
         XCTAssertTrue(awake.isSubset(of: plain), "the >_ is drawn on the screen")
         XCTAssertEqual(face.y + 2, sprite.eyeBottom)
-        // Working, the cursor _ blinks: four cells fewer every other half second.
-        let on = glyph(.busy, 0.1).count, off = glyph(.busy, 0.6).count
-        XCTAssertEqual(on - off, 4)
+        // Reading, the whole >_ sits a row lower than while it builds.
+        func rows(_ cells: Set<String>) -> [Int] { cells.compactMap { Int($0.split(separator: ",")[1]) } }
+        let reading = glyph(.busy, 0.1, work: .read), building = glyph(.busy, 0.1, work: .edit)
+        XCTAssertEqual(reading.count, building.count)
+        XCTAssertEqual(rows(reading).min()!, rows(building).min()! + 1)
     }
 
-    /// While it types, Clawd's one-pixel eyes slide toward the screen.
-    func testTypingPetLooksAtTheScreen() {
+    /// At its craft, Clawd's one-pixel eyes slide toward the work on its
+    /// right; reading, they look down at the book instead.
+    func testWorkingPetLooksAtItsCraft() {
         let sprite = PetSpecies.clawd.sprite
         let eye = sprite.palette["E"]!
-        func eyeXs(_ t: Double) -> [Int] {
-            PetFrame.pixels(sprite: sprite, state: .busy, t: t).filter { $0.rgb == eye }.map(\.x).sorted()
+        func eyes(_ work: PetWork) -> [PetPixel] {
+            PetFrame.pixels(sprite: sprite, state: .busy, t: 0.1, work: work).filter { $0.rgb == eye }
         }
-        let typing = eyeXs(0.02), resting = eyeXs(3.5)
-        XCTAssertEqual(typing.count, resting.count)
-        XCTAssertEqual(zip(typing, resting).map { $0 - $1 }, Array(repeating: 1, count: typing.count),
-                       "eyes one pixel to the right while typing")
+        let building = eyes(.edit), reading = eyes(.read)
+        XCTAssertEqual(Set(building.map(\.x)), Set(reading.map { $0.x + 1 }), "eyes one pixel to the right")
+        XCTAssertEqual(Set(reading.map(\.y)).count, 1, "reading, only the eyes' lower half shows")
+        XCTAssertEqual(Set(building.map(\.y)).count, 2)
     }
 }
 
@@ -198,69 +246,59 @@ private extension UInt32 {
     }
 }
 
-/// A busy pet's sign: what it is working on, above its laptop.
-final class PetSignTests: XCTestCase {
-    private func cells(_ pixels: [PetPixel]) -> [String: UInt32] {
-        Dictionary(uniqueKeysWithValues: pixels.map { ("\($0.x),\($0.y)", $0.rgb) })
-    }
-
-    /// The sign sits in the canvas above the screen, right of the pet, and
-    /// never paints over the pet, the laptop or anything else in the frame.
-    func testSignFloatsAboveTheLaptopAndCoversNothing() {
-        for species in PetSpecies.allCases {
-            let floor = species.sprite.bodyBottom + PetFrame.originY
-            for sign in PetSign.allCases {
-                for i in 0..<40 {
-                    let t = Double(i) * 0.11
-                    let plain = cells(PetFrame.pixels(sprite: species.sprite, state: .busy, t: t))
-                    let signed = cells(PetFrame.pixels(sprite: species.sprite, state: .busy, t: t, sign: sign))
-                    for (key, rgb) in plain {
-                        XCTAssertEqual(signed[key], rgb, "\(species) \(sign): the sign covered \(key)")
-                    }
-                    let added = signed.keys.filter { plain[$0] == nil }
-                    XCTAssertFalse(added.isEmpty, "\(species) \(sign) at \(t): no sign drawn")
-                    for key in added {
-                        let xy = key.split(separator: ",").compactMap { Int($0) }
-                        XCTAssertTrue((15..<PetFrame.canvasWidth).contains(xy[0]), "\(species) \(sign): x \(xy[0])")
-                        XCTAssertTrue((0..<(floor - 5)).contains(xy[1]), "\(species) \(sign): y \(xy[1]) not above the screen")
-                    }
-                }
-            }
-        }
-    }
-
-    /// Only a pet at its laptop wears a sign: asleep, idle, waiting on you
-    /// or celebrating, it shows nothing extra.
-    func testOnlyABusyPetShowsItsSign() {
+/// What a busy pet acts out, and the two ways a pet waits on you.
+final class PetWorkTests: XCTestCase {
+    /// Only a busy pet acts out its work: asleep, idle, waiting on you or
+    /// celebrating, a craft changes nothing.
+    func testOnlyABusyPetActsOutItsWork() {
         for species in PetSpecies.allCases {
             for state in PetState.allCases where state != .busy {
                 XCTAssertEqual(
-                    PetFrame.pixels(sprite: species.sprite, state: state, t: 1.3, sign: .shell),
+                    PetFrame.pixels(sprite: species.sprite, state: state, t: 1.3, work: .shell),
                     PetFrame.pixels(sprite: species.sprite, state: state, t: 1.3),
                     "\(species) \(state)")
             }
         }
     }
 
-    /// Thinking, the dots come one by one and start over.
-    func testThinkingDotsComeOneByOne() {
-        let sprite = PetSpecies.clawd.sprite
-        func dots(_ t: Double) -> Int {
-            let plain = Set(PetFrame.pixels(sprite: sprite, state: .busy, t: t).map { "\($0.x),\($0.y)" })
-            return PetFrame.pixels(sprite: sprite, state: .busy, t: t, sign: .thinking)
-                .filter { !plain.contains("\($0.x),\($0.y)") }.count
+    /// With nothing known about its work, a busy pet thinks: the firefly.
+    func testABusyPetWithoutWorkThinks() {
+        for species in PetSpecies.allCases {
+            for t in [0.0, 1.3, 3.7] {
+                XCTAssertEqual(PetFrame.pixels(sprite: species.sprite, state: .busy, t: t),
+                               PetFrame.pixels(sprite: species.sprite, state: .busy, t: t, work: .think), "\(species)")
+            }
         }
-        let p = PetSign.thinkingDotPeriod
-        XCTAssertEqual([0.1, 1.1, 2.1, 3.1].map { dots($0 * p) }, [1, 2, 3, 1])
     }
 
-    /// A tool's sign holds into the thinking after it; nothing else waits.
-    func testOnlyAToolSignLingersIntoThinking() {
-        XCTAssertTrue(PetSign.lingers(from: .shell, to: .thinking))
-        XCTAssertTrue(PetSign.lingers(from: .edit, to: .thinking))
-        XCTAssertFalse(PetSign.lingers(from: .shell, to: .edit))
-        XCTAssertFalse(PetSign.lingers(from: .thinking, to: .read))
-        XCTAssertFalse(PetSign.lingers(from: nil, to: .thinking))
-        XCTAssertFalse(PetSign.lingers(from: .shell, to: nil))
+    /// An approval stands tall under a "!"; a question tilts its head under
+    /// a "?". Both in the night light's amber.
+    func testApprovalAndQuestionLookDifferent() {
+        for species in PetSpecies.allCases {
+            let sprite = species.sprite
+            let body = sprite.palette["B"]!
+            func top(_ px: [PetPixel]) -> Int { px.filter { $0.rgb == body }.map(\.y).min()! }
+            let resting = PetFrame.pixels(sprite: sprite, state: .idle, t: 0)
+            let approval = PetFrame.pixels(sprite: sprite, state: .attention, t: 0)
+            let question = PetFrame.pixels(sprite: sprite, state: .question, t: 0)
+            XCTAssertNotEqual(approval, question, "\(species)")
+            XCTAssertEqual(top(approval), top(resting) - 1, "\(species): the sentry stands a row taller")
+            XCTAssertTrue(approval.contains { $0.rgb == 0xF5B764 })
+            XCTAssertTrue(question.contains { $0.rgb == 0xF5B764 })
+            // The head tilts one way, then the other.
+            XCTAssertNotEqual(question.filter { $0.rgb != 0xF5B764 },
+                              PetFrame.pixels(sprite: sprite, state: .question, t: 1.3).filter { $0.rgb != 0xF5B764 },
+                              "\(species): the head doesn't tilt")
+        }
+    }
+
+    /// A tool's craft holds into the thinking after it; nothing else waits.
+    func testOnlyAToolsCraftLingersIntoThinking() {
+        XCTAssertTrue(PetWork.lingers(from: .shell, to: .think))
+        XCTAssertTrue(PetWork.lingers(from: .search, to: .think))
+        XCTAssertFalse(PetWork.lingers(from: .shell, to: .edit))
+        XCTAssertFalse(PetWork.lingers(from: .think, to: .read))
+        XCTAssertFalse(PetWork.lingers(from: nil, to: .think))
+        XCTAssertFalse(PetWork.lingers(from: .shell, to: nil))
     }
 }

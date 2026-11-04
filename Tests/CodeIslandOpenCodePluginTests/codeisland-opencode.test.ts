@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import plugin, {
+  BLOCKING_TIMEOUT_MS,
   answerKeys,
   answersFromDecision,
+  createPendingSessions,
   createV2Mapper,
   createV2Runtime,
   isPlaceholderTitle,
@@ -165,6 +167,34 @@ describe("OpenCode 2 event mapping", () => {
     expect(map({ type: "session.created", properties: { info: { id: "ses_x", directory: "/p" } } })).toBeNull();
   });
 
+  test("replies name the request they answer", () => {
+    const map = createV2Mapper(base);
+    expect(map(ev("permission.replied", { sessionID: "ses_r", requestID: "per_1", reply: "once" })))
+      .toMatchObject({ hook_event_name: "PostToolUse", _opencode_request_id: "per_1" });
+    expect(map(ev("form.replied", { id: "frm_1", sessionID: "ses_r", answer: {} })))
+      .toMatchObject({ hook_event_name: "PostToolUse", _opencode_request_id: "frm_1" });
+    expect(map(ev("form.cancelled", { id: "frm_2", sessionID: "ses_r" })))
+      .toMatchObject({ hook_event_name: "PostToolUse", _opencode_request_id: "frm_2" });
+  });
+
+  // Health check 2026-11-04 #3: the plugin gave up on a held request after
+  // five minutes, which took the card down while OpenCode still waited.
+  test("a held request waits as long as a hook does", () => {
+    expect(BLOCKING_TIMEOUT_MS).toBe(86_400_000);
+  });
+
+  test("pending sessions are counted, not just remembered", () => {
+    const pending = createPendingSessions();
+    pending.add("s"); pending.add("s");
+    pending.delete("s");
+    expect(pending.has("s")).toBe(true);
+    pending.delete("s");
+    expect(pending.has("s")).toBe(false);
+    pending.delete("s");
+    pending.add("s");
+    expect(pending.has("s")).toBe(true);
+  });
+
   test("tool name mapping keeps CodeIsland's special cases", () => {
     expect(v2ToolName("shell")).toBe("Bash");
     expect(v2ToolName("subagent")).toBe("Task");
@@ -264,6 +294,40 @@ describe("OpenCode 2 runtime round-trips", () => {
     expect(h.replies).toEqual([]);
   });
 
+  // Health check 2026-11-04 #2: two requests held in one session. Answering
+  // one (in the TUI, rejecting counts) must name that one, and the session
+  // stays held for the other.
+  test("a reply names its request, and the session stays held for the other", async () => {
+    const sent: any[] = [];
+    const releases = new Map<string, (value: unknown) => void>();
+    const replies: unknown[] = [];
+    const handle = createV2Runtime({
+      base,
+      send: async (payload: unknown) => { sent.push(payload); return true; },
+      ask: (payload: any) => new Promise((resolve) => { releases.set(payload._opencode_request_id, resolve); }),
+      replyPermission: async (...args: unknown[]) => { replies.push(args); },
+      replyForm: async () => true,
+      cancelForm: async () => true,
+      canAnswerForms: () => true,
+    });
+    await handle(ev("permission.asked", { id: "per_ls", sessionID: "ses_2", action: "shell", resources: ["ls"] }));
+    await handle(ev("permission.asked", { id: "per_rm", sessionID: "ses_2", action: "shell", resources: ["rm -rf dist"] }));
+    await handle(ev("permission.replied", { sessionID: "ses_2", requestID: "per_ls", reply: "reject" }));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ hook_event_name: "PostToolUse", _opencode_request_id: "per_ls" });
+
+    // The island lets go of per_ls with no decision: nothing is replied for it.
+    releases.get("per_ls")!({});
+    await settle();
+    expect(replies).toEqual([]);
+
+    // per_rm still waits, so the session's other activity stays held back.
+    await handle(ev("session.status", { sessionID: "ses_2", status: { type: "busy" } }));
+    expect(sent).toHaveLength(1);
+    releases.get("per_rm")!(null);
+    await settle();
+  });
+
   test("a session created before the plugin started is looked up once for its directory", async () => {
     const sent: any[] = [];
     const lookups: string[] = [];
@@ -338,6 +402,64 @@ describe("OpenCode 2 server placement", () => {
     expect(signal?.aborted).toBe(false);
     cleanup();
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+// OpenCode 1.x (the desktop app is 1.19) holds requests through the bridge
+// binary in ~/.codeisland. A stand-in bridge under a temporary HOME lets one
+// request be answered while the other keeps waiting (health check 2026-11-04 #2).
+describe("OpenCode 1 server() with two held requests", () => {
+  const pluginPath = join(import.meta.dir, "../../Sources/CodeIsland/Resources/codeisland-opencode.js");
+
+  test("answering one in the TUI names it, and the other keeps the session held", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "codeisland-v1-"));
+    const file = join(dir, "codeisland.js");
+    writeFileSync(file, readFileSync(pluginPath, "utf8"));
+    mkdirSync(join(dir, ".codeisland"));
+    const bridge = join(dir, ".codeisland", "codeisland-bridge");
+    // per_ls is answered quickly (no decision, as the island does when the
+    // TUI answered it); per_rm waits longer.
+    writeFileSync(bridge, '#!/bin/sh\ninput=$(cat)\ncase "$input" in *per_ls*) sleep 0.2;; *) sleep 1.5;; esac\nprintf "{}"\n');
+    chmodSync(bridge, 0o755);
+
+    const socketPath = join(dir, "island.sock");
+    const received: Record<string, unknown>[] = [];
+    const island = createServer((sock) => {
+      let buf = "";
+      sock.on("data", (d) => { buf += d; });
+      sock.on("end", () => { received.push(JSON.parse(buf)); });
+    });
+    await new Promise<void>((resolve) => island.listen(socketPath, resolve));
+    const saved = { socket: process.env.CODEISLAND_SOCKET_PATH, home: process.env.HOME };
+    process.env.CODEISLAND_SOCKET_PATH = socketPath;
+    process.env.HOME = dir;
+
+    try {
+      const mod = await import(file);
+      const hooks = await mod.default.server({ client: {}, serverUrl: new URL("http://localhost:4096") });
+      const fire = (type: string, properties: Record<string, unknown>) => hooks.event({ event: { type, properties } });
+
+      await fire("permission.asked", { id: "per_ls", sessionID: "ses_v1", permission: "bash", patterns: ["ls"] });
+      await fire("permission.asked", { id: "per_rm", sessionID: "ses_v1", permission: "bash", patterns: ["rm -rf dist"] });
+      await fire("permission.replied", { sessionID: "ses_v1", requestID: "per_ls", reply: "reject" });
+      for (let i = 0; i < 100 && received.length < 1; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ hook_event_name: "PostToolUse", _opencode_request_id: "per_ls" });
+
+      // per_ls's bridge has returned; per_rm's has not.
+      await new Promise((r) => setTimeout(r, 600));
+      await fire("session.status", { sessionID: "ses_v1", status: { type: "busy" } });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(received).toHaveLength(1);
+
+      await new Promise((r) => setTimeout(r, 1200));
+    } finally {
+      if (saved.socket === undefined) delete process.env.CODEISLAND_SOCKET_PATH;
+      else process.env.CODEISLAND_SOCKET_PATH = saved.socket;
+      process.env.HOME = saved.home;
+      await new Promise<void>((resolve) => island.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

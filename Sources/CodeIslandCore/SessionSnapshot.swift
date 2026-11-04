@@ -887,7 +887,7 @@ public func reduceEvent(
         if sessions[sessionId]?.source == "codex" {
             sessions[sessionId]?.currentTool = "Compacting"
         }
-        sessions[sessionId]?.toolDescription = "Compacting context\u{2026}"
+        sessions[sessionId]?.toolDescription = SessionSnapshot.compactingNote
     case "PostCompact":
         if !isWaiting {
             sessions[sessionId]?.status = .processing
@@ -1392,4 +1392,10 @@ private func handleSubagentEvent(
     default:
         return false  // Fall through to normal session handling
     }
+}
+
+extension SessionSnapshot {
+    /// What a compacting row says, from PreCompact until PostCompact or the
+    /// SessionStart after it.
+    public static let compactingNote = "Compacting context\u{2026}"
 }

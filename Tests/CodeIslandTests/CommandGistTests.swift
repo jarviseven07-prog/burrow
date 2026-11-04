@@ -57,8 +57,69 @@ final class CommandGistTests: XCTestCase {
     func testHeredocBodiesAreNotCommands() {
         let cmd = "python3 - <<'EOF'\nimport os\nrm = 1\nEOF\necho done"
         XCTAssertEqual(zh(cmd), "运行一段 Python")
-        XCTAssertEqual(zh("cat > notes.md <<'EOF'\nrm -rf everything\nEOF"), nil, "writing a file is not reading it")
+        XCTAssertEqual(zh("cat > notes.md <<'EOF'\nrm -rf everything\nEOF"), "覆盖写入 notes.md", "writing a file is not reading it")
         XCTAssertEqual(zh("\"$B\" --source codex <<<'{\"a\": \"rm -rf x\"}'"), nil)
+    }
+
+    // MARK: - Health check 2026-11-04 #7: nothing that changes things is called a look
+
+    func testFindThatDeletesOrRunsSaysSo() {
+        XCTAssertEqual(zh("find ~/Developer -name '*.swift' -delete"), "删掉找到的文件")
+        XCTAssertEqual(CommandGist.of("find x -delete", language: "zh")?.changes, true)
+        XCTAssertEqual(zh("find . -name '*.orig' -exec rm -rf {} +"), "删掉文件")
+        XCTAssertEqual(zh("find . -type d -empty -execdir rmdir {} \\;"), "删掉文件")
+        XCTAssertEqual(zh("find . -name '*.log' -exec grep -l error {} +"), "在文件里搜「error」")
+        XCTAssertEqual(zh("find . -name '*.swift'"), "看看文件夹里有什么")
+        XCTAssertEqual(zh("find . -type f -exec wc -l {} + -exec rm -f {} +"), "删掉文件", "a later -exec is not hidden")
+        XCTAssertEqual(zh("find . -exec grep -l x {} \\; -exec rm {} \\;"), "删掉文件", "\\; ends the -exec, not the line")
+        XCTAssertEqual(CommandGist.of("find ~/x -delete", language: "en")?.text, "delete the files it finds")
+    }
+
+    func testGitThatThrowsWorkAwaySaysSo() {
+        XCTAssertEqual(zh("git checkout -- ."), "丢掉还没提交的改动")
+        XCTAssertEqual(zh("git checkout ."), "丢掉还没提交的改动")
+        XCTAssertEqual(zh("git checkout -- Sources/a.swift"), "丢掉还没提交的改动")
+        XCTAssertEqual(zh("git checkout -f main"), "丢掉还没提交的改动")
+        XCTAssertEqual(zh("git checkout main"), "切换或新建分支")
+        XCTAssertEqual(zh("git checkout -b feature"), "切换或新建分支")
+        XCTAssertEqual(zh("git branch -D release"), "删掉分支 release")
+        XCTAssertEqual(zh("git branch --delete old"), "删掉分支 old")
+        XCTAssertEqual(zh("git branch feature"), "切换或新建分支")
+        XCTAssertEqual(zh("git stash clear"), "丢掉收起来的改动")
+        XCTAssertEqual(zh("git stash drop stash@{0}"), "丢掉收起来的改动")
+        XCTAssertEqual(zh("git stash"), "把改动先收起来")
+        XCTAssertEqual(zh("git push origin --delete main"), "删掉远端的分支 main")
+        XCTAssertEqual(zh("git push -d origin feature"), "删掉远端的分支 feature")
+        XCTAssertEqual(zh("git push origin :old-branch"), "删掉远端的分支 old-branch")
+        XCTAssertEqual(zh("git push origin main"), "上传到远端仓库")
+        XCTAssertEqual(CommandGist.of("git branch -D release", language: "en")?.text, "delete the branch release")
+        XCTAssertEqual(CommandGist.of("git push origin --delete main", language: "en")?.text, "delete main on the remote")
+    }
+
+    func testWritingToAFileIsSaid() {
+        XCTAssertEqual(zh("cat /dev/null > ~/.zshrc"), "覆盖写入 .zshrc")
+        XCTAssertEqual(zh("echo 'export X=1' >> ~/.zshrc"), "往 .zshrc 末尾追加内容")
+        XCTAssertEqual(zh("echo hi >out.txt"), "覆盖写入 out.txt")
+        XCTAssertEqual(zh("cat /dev/null>~/.zshrc"), "覆盖写入 .zshrc", "a > needs no space before it")
+        XCTAssertEqual(zh("echo done>>log.txt"), "往 log.txt 末尾追加内容")
+        XCTAssertEqual(zh("swift build 2>&1|tail -5"), "编译")
+        XCTAssertEqual(zh("grep \"a>b\" x.swift"), "在文件里搜「a>b」", "a quoted > is text")
+        XCTAssertEqual(zh("grep \\> README.md"), "在文件里搜「\\>」", "an escaped > is text")
+        XCTAssertEqual(zh("swift build > build.log 2>&1"), "编译，再覆盖写入 build.log")
+        XCTAssertEqual(zh("ls >/dev/null 2>&1"), "看看文件夹里有什么")
+        XCTAssertEqual(zh("swift build 2>/dev/null"), "编译")
+        XCTAssertEqual(CommandGist.of("cat /dev/null > ~/.zshrc", language: "en")?.text, "overwrite .zshrc")
+        // A log being written never hides a push.
+        XCTAssertEqual(zh("./build.sh > build.log 2>&1 && git push"), "运行脚本 build.sh，再上传到远端仓库（共 3 步）")
+    }
+
+    func testWrappersAreLookedThrough() {
+        XCTAssertEqual(zh("xargs rm -rf < dirs.txt"), "删掉文件")
+        XCTAssertEqual(zh("xargs -n 1 rm < list.txt"), "删掉文件")
+        XCTAssertEqual(zh("xargs trash < list.txt"), "把文件移到废纸篓")
+        XCTAssertEqual(zh("timeout 60 rm -rf build"), "删掉 build")
+        XCTAssertEqual(zh("timeout -s KILL 5m swift test"), "跑测试")
+        XCTAssertEqual(zh("find build -type f -print0 | xargs -0 rm"), "看看文件夹里有什么，再删掉文件")
     }
 
     func testUnknownProgramsAreNamed() {

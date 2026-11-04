@@ -268,14 +268,17 @@ struct BurrowDen: View {
         .padding(.bottom, 12)
         // While the pointer is over the den its rows hold still, so a click
         // lands on the row it was aimed at.
+        // Nor are finished rows taken out from under it (AppState.denHoldsItsRows).
         .onHover { inside in
             thawTask?.cancel()
             if inside {
                 orderFreeze.freeze(liveOrder)
+                appState.denPointerInside = true
             } else {
                 thawTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: SessionOrderFreeze.releaseDelay)
                     guard !Task.isCancelled else { return }
+                    appState.denPointerInside = false
                     withAnimation(Burrow.settle) { orderFreeze.thaw() }
                 }
             }

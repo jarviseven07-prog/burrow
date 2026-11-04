@@ -445,10 +445,10 @@ class HookServer {
 
             // AskUserQuestion is a question, not a permission — route to QuestionBar
             if event.toolName == "AskUserQuestion" {
-                monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
+                let connectionId = monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
                 Task {
                     let responseBody = await withCheckedContinuation { continuation in
-                        appState.handleAskUserQuestion(event, continuation: continuation)
+                        appState.handleAskUserQuestion(event, connectionId: connectionId, continuation: continuation)
                     }
                     self.sendResponse(connection: connection, data: responseBody)
                 }
@@ -460,20 +460,20 @@ class HookServer {
                 return
             }
 
-            monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
+            let connectionId = monitorPeerDisconnect(connection: connection, sessionId: sessionId, agentId: event.agentId)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
-                    appState.handlePermissionRequest(event, continuation: continuation)
+                    appState.handlePermissionRequest(event, connectionId: connectionId, continuation: continuation)
                 }
                 self.sendResponse(connection: connection, data: responseBody)
             }
 
         case .question:
             let questionSessionId = event.sessionId ?? "default"
-            monitorPeerDisconnect(connection: connection, sessionId: questionSessionId, agentId: event.agentId)
+            let connectionId = monitorPeerDisconnect(connection: connection, sessionId: questionSessionId, agentId: event.agentId)
             Task {
                 let responseBody = await withCheckedContinuation { continuation in
-                    appState.handleQuestion(event, continuation: continuation)
+                    appState.handleQuestion(event, connectionId: connectionId, continuation: continuation)
                 }
                 self.sendResponse(connection: connection, data: responseBody)
             }
@@ -503,9 +503,12 @@ class HookServer {
     /// That caused every PermissionRequest to be auto-drained as `deny` before the UI
     /// card was even visible. We now rely on `stateUpdateHandler` transitioning to
     /// `cancelled`/`failed` — which only happens on real socket teardown, not half-close.
-    private func monitorPeerDisconnect(connection: NWConnection, sessionId: String, agentId: String?) {
+    /// Returns the id the request on this connection is filed under, so a
+    /// disconnect settles that request alone (health check 2026-11-04 #6).
+    private func monitorPeerDisconnect(connection: NWConnection, sessionId: String, agentId: String?) -> UUID {
         let context = ConnectionContext()
         let connId = ObjectIdentifier(connection)
+        let requestConnectionId = UUID()
         connectionContexts[connId] = context
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -514,7 +517,9 @@ class HookServer {
                 switch state {
                 case .cancelled, .failed:
                     if !context.responded {
-                        self.appState.handlePeerDisconnect(sessionId: sessionId, agentId: agentId)
+                        self.appState.handlePeerDisconnect(
+                            sessionId: sessionId, agentId: agentId, connectionId: requestConnectionId
+                        )
                     }
                     self.connectionContexts.removeValue(forKey: connId)
                 default:
@@ -522,19 +527,13 @@ class HookServer {
                 }
             }
         }
-
-        // Safety net: if the connection context is still around after 5 minutes
-        // (e.g. stuck continuation, NWConnection never transitions), clean it up.
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 300_000_000_000)  // 5 minutes
-            guard let self = self else { return }
-            if self.connectionContexts.removeValue(forKey: connId) != nil {
-                log.warning("Connection context for session \(sessionId) timed out — cleaning up")
-                if !context.responded {
-                    connection.cancel()
-                }
-            }
-        }
+        // No timer: this connection waits for the user, as long as the hook
+        // does (86400 s, ConfigInstaller; the bridge's socket the same). It
+        // ends when Burrow answers (sendResponse) or the peer goes away — the
+        // bridge dying shows up here as failed. A five-minute safety net used
+        // to cancel it, which read as "answered elsewhere": the card vanished
+        // while the agent still waited (health check 2026-11-04 #3).
+        return requestConnectionId
     }
 
     private func sendResponse(connection: NWConnection, data: Data) {

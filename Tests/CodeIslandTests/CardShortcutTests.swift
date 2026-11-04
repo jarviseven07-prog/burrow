@@ -139,6 +139,48 @@ final class CardShortcutTests: XCTestCase {
         XCTAssertEqual(appState.permissionQueue.count, 1)
     }
 
+    // MARK: - Health check 2026-11-04 #17: the island hidden over a full-screen app
+
+    /// Over a full-screen video the island hides, card and all. ⌘⇧A then must
+    /// not approve what nobody can see: it calls the card up over the video,
+    /// and only the next press approves.
+    func testApproveWhileTheIslandIsHiddenOnlyCallsTheCardUp() async throws {
+        try await requestApproval("FS")
+        XCTAssertEqual(appState.surface, .approvalCard(sessionId: "FS"))
+        appState.isIslandOnScreen = false
+
+        XCTAssertEqual(appState.performCardShortcut(.approve), .opened(.approvalCard(sessionId: "FS")))
+        XCTAssertEqual(appState.permissionQueue.count, 1, "nothing is approved unseen")
+        XCTAssertTrue(appState.showsCardOverHiddenIsland, "the card comes up over the full-screen app")
+
+        appState.isIslandOnScreen = true  // PanelWindowController brought it up
+        XCTAssertEqual(appState.performCardShortcut(.approve), .acted(sessionId: "FS"))
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+        XCTAssertFalse(appState.showsCardOverHiddenIsland, "answered: the island hides again")
+    }
+
+    /// The same for deny, and for a request whose card was not open yet.
+    func testDenyWhileHiddenOpensTheWaitingCardWithoutDenying() async throws {
+        UserDefaults.standard.set(false, forKey: SettingsKey.autoExpandOnPermission)
+        try await requestApproval("FS2")
+        appState.isIslandOnScreen = false
+
+        XCTAssertEqual(appState.performCardShortcut(.deny), .opened(.approvalCard(sessionId: "FS2")))
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertTrue(appState.showsCardOverHiddenIsland)
+        XCTAssertEqual(appState.performCardShortcut(.deny), .opened(.approvalCard(sessionId: "FS2")),
+                       "still hidden: still only called up")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+    }
+
+    func testSkipWhileHiddenOnlyCallsTheQuestionUp() async throws {
+        try await ask("FQ")
+        appState.isIslandOnScreen = false
+        XCTAssertEqual(appState.performCardShortcut(.skipQuestion), .opened(.questionCard(sessionId: "FQ")))
+        XCTAssertEqual(appState.questionQueue.count, 1)
+        XCTAssertTrue(appState.showsCardOverHiddenIsland)
+    }
+
     func testCardShortcutsDoNothingWithNothingWaiting() {
         appState.surface = .sessionList
         for action in [ShortcutAction.approve, .approveAlways, .deny, .skipQuestion] {

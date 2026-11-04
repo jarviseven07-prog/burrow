@@ -79,6 +79,30 @@ final class IdleClaudeCompactionTests: XCTestCase {
         XCTAssertFalse(AppState.isIdleClaudeCompaction(normalizedEventName: "SubagentStop", rawJSON: ["_source": "claude"], session: idle))
     }
 
+    /// Health check 2026-11-04 #12: a manual /compact runs after the turn
+    /// before it ended, so the transcript reads ended and the row showed
+    /// done after 30 s. While the compacting note is on it, the row is open
+    /// to the sweep; PostCompact takes the note away.
+    func testAManualCompactStaysOpenUntilItEnds() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("compact-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let ended: [String: Any] = ["type": "assistant", "message": ["role": "assistant", "stop_reason": "end_turn", "content": []]]
+        try JSONSerialization.data(withJSONObject: ended).write(to: url)
+
+        let app = AppState()
+        finishedRow(app, at: Date())
+        app.sessions[id]?.transcriptPath = url.path
+        XCTAssertEqual(AppState.claudeSweepTurn(app.sessions[id]!), .ended)
+
+        app.handleEvent(event(#"{"session_id":"1780bce2-8006-47ba-a162-f4ec6a12fc39","hook_event_name":"PreCompact","trigger":"manual","_source":"claude","cwd":"/tmp/burrow"}"#))
+        XCTAssertEqual(app.sessions[id]?.toolDescription, SessionSnapshot.compactingNote)
+        XCTAssertEqual(AppState.claudeSweepTurn(app.sessions[id]!), .open, "compacting, whatever the transcript says")
+
+        app.handleEvent(event(#"{"session_id":"1780bce2-8006-47ba-a162-f4ec6a12fc39","hook_event_name":"PostCompact","trigger":"manual","_source":"claude","cwd":"/tmp/burrow"}"#))
+        XCTAssertNil(app.sessions[id]?.toolDescription)
+        XCTAssertEqual(AppState.claudeSweepTurn(app.sessions[id]!), .ended, "done compacting: the transcript decides again")
+    }
+
     /// The sweep judges a thinking Claude row by its transcript even with a
     /// note on it; a running tool is never timed out while its process lives.
     func testTheSweepJudgesThinkingClaudeRowsWithANote() {

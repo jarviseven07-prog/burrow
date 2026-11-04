@@ -1,8 +1,9 @@
 {
-  "_comment": "Agent pets as 16x16 pixel art with buddy's seven states (anthropics/claude-desktop-buddy, MIT). Legend: . empty, B body, L light, A accent, E eye (2x2 blocks or 1-wide columns), K dark detail, P extra. Agents not listed under sources get no pet: they take no place beside the notch (2026-10-28, the mint fallback Clawd was removed). Generated into Sources/CodeIslandCore/PetSprites.swift by scripts/gen_pet_sprites.py. A species with `face` has no E cells: its eyes are a glyph lit on its screen at (x, y) (PetFrame.screenGlyph; design/v18/v04, after the official Codex pet).",
+  "_comment": "Agent pets as 16x16 pixel art with buddy's seven states (anthropics/claude-desktop-buddy, MIT). Legend: . empty, B body, L light, A accent, E eye (2x2 blocks or 1-wide columns), K dark detail, P extra. Agents not listed under sources get no pet: they take no place beside the notch (2026-10-28, the mint fallback Clawd was removed). Generated into Sources/CodeIslandCore/PetSprites.swift by scripts/gen_pet_sprites.py. A species with `face` has no E cells: its eyes are a glyph lit on its screen at (x, y) (PetFrame.screenGlyph; design/v18/v04, after the official Codex pet). `waist` is a plain row under the face: a squash drops it and a stretch repeats it, so the face moves as one (design/v25).",
   "species": {
     "clawd": {
       "name": "Clawd",
+      "waist": 11,
       "eyeBg": "B",
       "pal": {
         "B": "#DE886D",
@@ -30,6 +31,7 @@
     },
     "codex": {
       "name": "Codex 云朵头",
+      "waist": 11,
       "eyeBg": "S",
       "pal": {
         "B": "#5F8FF0",
@@ -63,6 +65,7 @@
     },
     "opencode": {
       "name": "OpenCode 方环",
+      "waist": 10,
       "eyeBg": "L",
       "pal": {
         "B": "#F2F2F2",
@@ -91,6 +94,7 @@
     },
     "antigravity": {
       "name": "Antigravity 渐变拱门",
+      "waist": 9,
       "eyeBg": "B",
       "pal": {
         "B": "#4D80F2",

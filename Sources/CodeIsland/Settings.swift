@@ -278,7 +278,43 @@ class SettingsManager {
         }
     }
 
-    static let launchAtLoginWantedKey = "launchAtLoginWanted"
+    nonisolated static let launchAtLoginWantedKey = "launchAtLoginWanted"
+
+    /// The den back's switch. What is wanted is written down at once, in
+    /// the order the switch is flicked; the change itself runs off the main
+    /// thread — `SMAppService` calls block, and the switch stalled on them
+    /// (health check #23) — one at a time, each applying whatever is wanted
+    /// when it runs, so changes that start out of order still end where the
+    /// switch was left (review of #23). The task gives what the system ended
+    /// up with, so a failed change puts the switch back at once.
+    static func applyLaunchAtLogin(_ wanted: Bool) -> Task<Bool, Never> {
+        UserDefaults.standard.set(wanted, forKey: Self.launchAtLoginWantedKey)
+        return Task { await onLoginQueue { applyWantedLaunchAtLogin() } }
+    }
+
+    nonisolated private static func applyWantedLaunchAtLogin() -> Bool {
+        let wanted = UserDefaults.standard.bool(forKey: launchAtLoginWantedKey)
+        do {
+            if wanted { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch {
+            // Reported through the status below.
+        }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    /// The login item's state, read after any change still on its way.
+    nonisolated static func launchAtLoginEnabled() async -> Bool {
+        await onLoginQueue { SMAppService.mainApp.status == .enabled }
+    }
+
+    nonisolated private static let loginQueue = DispatchQueue(label: "burrow.login-item", qos: .userInitiated)
+
+    nonisolated private static func onLoginQueue(_ work: @escaping @Sendable () -> Bool) async -> Bool {
+        await withCheckedContinuation { done in
+            loginQueue.async { done.resume(returning: work()) }
+        }
+    }
 
     /// Called at launch: keep the login item pointing at this copy of the
     /// app. An enabled item is remembered as wanted; a wanted item that the

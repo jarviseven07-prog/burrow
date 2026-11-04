@@ -11,6 +11,17 @@ struct NotchIslandGeometry: Equatable {
     var topExtension: CGFloat
     var bottomRadius: CGFloat
     var expanded: Bool
+
+    /// The island's body in screen points for a panel window at
+    /// `panelFrame`, placed as the driver places it: hanging from the
+    /// window's top, centred plus `centerOffset`. The window itself is far
+    /// bigger and transparent — sized for a den of ten rows — so a click
+    /// inside the window can still be a click on what lies under it
+    /// (health check #4).
+    func screenRect(inPanel panelFrame: CGRect) -> CGRect {
+        CGRect(x: panelFrame.midX + centerOffset - width / 2, y: panelFrame.maxY - height,
+               width: width, height: height)
+    }
 }
 
 /// SwiftUI's `.spring(response:dampingFraction:)` for CASpringAnimation

@@ -142,6 +142,8 @@ class PanelWindowController: NSObject, NSWindowDelegate {
 
     private var panel: NSPanel?
     private var hostingView: NotchHostingView<NotchPanelView>?
+    /// Where the island is drawn, for telling a click on it from one beside it.
+    private var islandDriver: NotchIslandShapeDriver?
     private let appState: AppState
 
     nonisolated static func screenHopFrames(
@@ -216,6 +218,8 @@ class PanelWindowController: NSObject, NSWindowDelegate {
         withObservationTracking {
             _ = appState.sessions
             _ = appState.surface
+            _ = appState.calledUpCardRequestId
+            _ = appState.denShowsSettings
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -327,15 +331,15 @@ class PanelWindowController: NSObject, NSWindowDelegate {
                 case .approvalCard, .questionCard: return
                 default: break
                 }
-                // Don't collapse if click is within the panel frame (event leaked on external display)
+                // Don't collapse on a click on the island itself (one can leak
+                // here on an external display). The island, not the window:
+                // the transparent window covers most of the screen, and a
+                // click there is on another app (health check #4).
                 if let panelFrame = self.panel?.frame {
-                    let clickLocation = NSEvent.mouseLocation
-                    if panelFrame.contains(clickLocation) { return }
+                    let island = self.islandDriver?.target?.screenRect(inPanel: panelFrame).insetBy(dx: -4, dy: -4)
+                    if (island ?? panelFrame).contains(NSEvent.mouseLocation) { return }
                 }
-                withAnimation(NotchAnimation.close) {
-                    self.appState.surface = .collapsed
-                    self.appState.cancelCompletionQueue()
-                }
+                self.appState.closeIsland()
             }
         }
     }
@@ -344,6 +348,7 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     /// moves (NotchIslandContainerView).
     private func makeContentView(for screen: NSScreen) -> NSView {
         let driver = NotchIslandShapeDriver()
+        islandDriver = driver
         let hosting = makeHostingView(for: screen, islandDriver: driver)
         hostingView = hosting
         return NotchIslandContainerView(content: hosting, driver: driver)
@@ -633,15 +638,21 @@ class PanelWindowController: NSObject, NSWindowDelegate {
     private func updateVisibility() {
         guard let panel = panel else { return }
         let settings = SettingsManager.shared
-        if settings.hideInFullscreen && fullscreenLatch {
+        // A card a shortcut called up shows over the full-screen app
+        // (health check 2026-11-04 #17).
+        if settings.hideInFullscreen && fullscreenLatch && !appState.showsCardOverHiddenIsland {
             panel.orderOut(nil)
             MascotAnimationGate.shared.setPanelVisible(false)
+            appState.isIslandOnScreen = false
             return
         }
 
-        if settings.hideWhenNoSession && appState.activeSessionCount == 0 {
+        if Self.hidesWithNoSession(hideWhenNoSession: settings.hideWhenNoSession,
+                                   activeSessionCount: appState.activeSessionCount,
+                                   showsSettings: appState.denShowsSettings) {
             panel.orderOut(nil)
             MascotAnimationGate.shared.setPanelVisible(false)
+            appState.isIslandOnScreen = false
             return
         }
 
@@ -649,7 +660,16 @@ class PanelWindowController: NSObject, NSWindowDelegate {
             panel.orderFrontRegardless()
         }
         MascotAnimationGate.shared.setPanelVisible(true)
+        appState.isIslandOnScreen = true
         MascotAnimationGate.shared.setIdleSettled(isIslandSettled())
+    }
+
+    /// "Hide when no session" hides the panel while nothing runs — but not
+    /// while its settings are open: the menu bar item, the one way in then,
+    /// opened a back nobody could see (health check #22).
+    nonisolated static func hidesWithNoSession(hideWhenNoSession: Bool, activeSessionCount: Int,
+                                               showsSettings: Bool) -> Bool {
+        hideWhenNoSession && activeSessionCount == 0 && !showsSettings
     }
 
     /// Collapsed island with nothing running — the state a Mac spends most of

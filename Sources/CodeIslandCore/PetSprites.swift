@@ -39,7 +39,7 @@ extension PetSpecies {
                 "...B.B....B.B...",
                 "...B.B....B.B...",
                 "................"
-            ], palette: ["B": 0xDE886D, "E": 0x000000, "K": 0x000000], eyeBackground: "B")
+            ], palette: ["B": 0xDE886D, "E": 0x000000, "K": 0x000000], eyeBackground: "B", waist: 11)
         case .codex:
             return PetSprite(rows: [
                 "................",
@@ -58,7 +58,7 @@ extension PetSpecies {
                 "....DD....DD....",
                 "................",
                 "................"
-            ], palette: ["B": 0x5F8FF0, "D": 0x4474D8, "S": 0x17306E, "E": 0x8EE8FF, "K": 0x0E1A33], eyeBackground: "S", screenFace: PetScreenFace(x: 4, y: 7))
+            ], palette: ["B": 0x5F8FF0, "D": 0x4474D8, "S": 0x17306E, "E": 0x8EE8FF, "K": 0x0E1A33], eyeBackground: "S", screenFace: PetScreenFace(x: 4, y: 7), waist: 11)
         case .opencode:
             return PetSprite(rows: [
                 "................",
@@ -77,7 +77,7 @@ extension PetSpecies {
                 "....BB....BB....",
                 "................",
                 "................"
-            ], palette: ["B": 0xF2F2F2, "L": 0x1E1E1E, "E": 0xFFFFFF, "K": 0xFFFFFF], eyeBackground: "L")
+            ], palette: ["B": 0xF2F2F2, "L": 0x1E1E1E, "E": 0xFFFFFF, "K": 0xFFFFFF], eyeBackground: "L", waist: 10)
         case .antigravity:
             return PetSprite(rows: [
                 "................",
@@ -96,7 +96,7 @@ extension PetSpecies {
                 "................",
                 "................",
                 "................"
-            ], palette: ["B": 0x4D80F2, "G": 0x9959E6, "H": 0xE6668C, "I": 0xF2994D, "E": 0x0E1230, "K": 0x0E1230], eyeBackground: "B")
+            ], palette: ["B": 0x4D80F2, "G": 0x9959E6, "H": 0xE6668C, "I": 0xF2994D, "E": 0x0E1230, "K": 0x0E1230], eyeBackground: "B", waist: 9)
         }
     }
 

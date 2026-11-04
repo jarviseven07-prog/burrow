@@ -10,10 +10,11 @@ struct PixelPetView: View {
     let species: PetSpecies
     let state: PetState
     var size: CGFloat = 27
-    /// When the current reaction began; its frames are counted from here.
+    /// When the current reaction (or craft) began; its frames are counted
+    /// from here.
     var phaseStart: Date? = nil
-    /// What it is working on, above its laptop while busy.
-    var sign: PetSign? = nil
+    /// The craft it acts out while busy.
+    var work: PetWork? = nil
     @Environment(\.mascotSpeed) private var speed
 
     private var cell: CGFloat { max(0.5, (size / 16 * 2).rounded(.down) / 2) }
@@ -22,13 +23,13 @@ struct PixelPetView: View {
         let cell = self.cell
         let sprite = species.sprite
         let state = self.state
-        let sign = self.sign
+        let work = self.work
         let origin = phaseStart.map { $0.timeIntervalSinceReferenceDate * speed } ?? 0
         MascotTimeline(interval: state.frameInterval) { t in
             Canvas { ctx, _ in
                 let local = phaseStart == nil ? t : t - origin
                 let gaze = state == .idle ? Self.gazeTowardPointer() : 0
-                Self.paint(PetFrame.pixels(sprite: sprite, state: state, t: local, gaze: gaze, sign: sign), cell: cell, into: &ctx)
+                Self.paint(PetFrame.pixels(sprite: sprite, state: state, t: local, gaze: gaze, work: work), cell: cell, into: &ctx)
             }
             .frame(width: CGFloat(PetFrame.canvasWidth) * cell,
                    height: CGFloat(PetFrame.canvasHeight) * cell)

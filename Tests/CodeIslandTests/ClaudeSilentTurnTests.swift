@@ -85,6 +85,66 @@ final class ClaudeSilentTurnTests: XCTestCase {
         XCTAssertEqual(AppState.claudeTranscriptTurn(atPath: url.path), .open)
     }
 
+    // MARK: Bookkeeping behind the last message (health check #9)
+
+    private func write(_ lines: [[String: Any]]) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("claude-turn-\(UUID().uuidString).jsonl")
+        try tail(lines).write(to: url)
+        return url
+    }
+
+    /// Claude Code's own lines, written after every request: a blob of up to
+    /// ~300 KB, then a few small ones. With them the last 64 KB held no
+    /// message, and the answer was "can't tell".
+    private func bookkeeping(blobBytes: Int) -> [[String: Any]] {
+        [["type": "api-request-blob", "hash": "h", "message": String(repeating: "x", count: blobBytes)],
+         ["type": "api-request", "id": "r1"], ["type": "cost-state", "totalCostUSD": 1], ["type": "last-prompt"]]
+    }
+
+    func testAnOpenTurnBehindABigBlobReadsOpen() throws {
+        let url = try write([assistant(stop: "tool_use", blocks: ["tool_use"]), user(toolResult)] + bookkeeping(blobBytes: 300_000))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertNil(AppState.claudeTranscriptTurn(tail: try Data(contentsOf: url).suffix(64 * 1024)), "what the 64 KB tail saw")
+        XCTAssertEqual(AppState.claudeTranscriptTurn(atPath: url.path), .open)
+    }
+
+    func testAnEndedTurnBehindBlobsReadsEnded() throws {
+        let url = try write([user("hi"), assistant(stop: "end_turn")] + bookkeeping(blobBytes: 200_000) + bookkeeping(blobBytes: 150_000))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(AppState.claudeTranscriptTurn(atPath: url.path), .ended)
+    }
+
+    /// A message longer than one piece (a tool result with an image) is
+    /// joined up before it is read.
+    func testAMessageLongerThanAPieceIsRead() throws {
+        let url = try write([assistant(stop: "end_turn"),
+                             user([["type": "text", "text": "[Request interrupted by user]"],
+                                   ["type": "text", "text": String(repeating: "图", count: 100_000)]])])
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(AppState.claudeTranscriptTurn(atPath: url.path), .ended)
+    }
+
+    /// No message within the budget: the turn counts as open, so it waits
+    /// for the 30-minute ceiling instead of the five-minute rule.
+    func testASpentBudgetReadsOpen() throws {
+        let data = try tail([assistant(stop: "end_turn")] + bookkeeping(blobBytes: 1_000_000))
+        let turn = AppState.claudeTranscriptTurn(size: UInt64(data.count), budget: 256 * 1024) { offset, length in
+            data.subdata(in: Int(offset)..<(Int(offset) + length))
+        }
+        XCTAssertEqual(turn, .open)
+        XCTAssertEqual(AppState.claudeTranscriptTurn(size: UInt64(data.count), budget: 4 << 20) { offset, length in
+            data.subdata(in: Int(offset)..<(Int(offset) + length))
+        }, .ended)
+    }
+
+    func testBookkeepingIsToldFromItsFirstBytes() {
+        XCTAssertTrue(AppState.isClaudeBookkeepingLine(Data(#"{"type":"api-request-blob","hash":"h"}"#.utf8)[...]))
+        XCTAssertTrue(AppState.isClaudeBookkeepingLine(Data(#"{"type":"custom-title","customTitle":"t"}"#.utf8)[...]))
+        XCTAssertFalse(AppState.isClaudeBookkeepingLine(Data(#"{"type":"user","message":{}}"#.utf8)[...]))
+        XCTAssertFalse(AppState.isClaudeBookkeepingLine(Data(#"{"type":"assistant","message":{}}"#.utf8)[...]))
+        XCTAssertFalse(AppState.isClaudeBookkeepingLine(Data(#"{"parentUuid":null,"type":"user"}"#.utf8)[...]))
+    }
+
     func testClaudeDesktopSessionIsNativeAppModeAndClaude() {
         // Why the 30s native-app rule caught it: both flags are true.
         var session = SessionSnapshot()

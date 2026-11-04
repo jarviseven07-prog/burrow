@@ -9,8 +9,8 @@ import CodeIslandCore
 /// band, each one whole. One that needs you stands in the night light: a
 /// warm glow at its feet.
 enum BurrowLipMetrics {
-    /// One pet's place beside the notch: its 24pt frame and room for the
-    /// laptop at its side while it works (the drawing is 30pt wide then).
+    /// One pet's place beside the notch: its 24pt frame and room for its
+    /// craft at its side while it works (the drawing is 30pt wide then).
     static let petSlot: CGFloat = 32
     /// Room left between the outermost pet and the island's edge.
     static let earPad: CGFloat = 4
@@ -21,8 +21,9 @@ enum BurrowLipMetrics {
     /// The collapsed island's bottom corners: the notch's own.
     static let bottomRadius: CGFloat = 10
 
-    /// The night light is on only for a pet that needs you.
-    static func isLit(_ state: PetState) -> Bool { state == .attention }
+    /// The night light is on only for a pet that needs you: an approval or
+    /// a question.
+    static func isLit(_ state: PetState) -> Bool { state == .attention || state == .question }
 
     /// Pets left and right of the notch, alternating in the den's order:
     /// the first is just left of the notch, the second just right, and so on.
@@ -102,7 +103,8 @@ extension PetSpecies {
     }
 }
 
-/// Which sign a working pet shows above its laptop.
+/// What a working conversation is doing: the den's row sign for it, and
+/// the craft its pet acts out beside the notch (design/v25 B).
 enum BurrowPetSign {
     /// Progress labels some agents report where a tool name would go.
     static let progressLabels: Set<String> = [
@@ -119,13 +121,19 @@ enum BurrowPetSign {
         }
     }
 
-    /// A tool's kind — an MCP tool by its own name, not its server's — or
+    /// A tool's own name, lowercased — an MCP tool's, not its server's — or
     /// nil for no tool or a progress label.
-    static func tool(_ raw: String?) -> PetSign? {
+    static func name(_ raw: String?) -> String? {
         guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty,
               !progressLabels.contains(trimmed.lowercased()) else { return nil }
-        let name = (trimmed.components(separatedBy: "__").last { !$0.isEmpty } ?? trimmed).lowercased()
+        return (trimmed.components(separatedBy: "__").last { !$0.isEmpty } ?? trimmed).lowercased()
+    }
+
+    /// A tool's kind — an MCP tool by its own name, not its server's — or
+    /// nil for no tool or a progress label.
+    static func tool(_ raw: String?) -> PetSign? {
+        guard let name = name(raw) else { return nil }
         switch name {
         // Codex's own activity labels (HookEvent.activityLabel).
         case "running command": return .shell
@@ -151,8 +159,51 @@ enum BurrowPetSign {
         }
     }
 
-    /// How long a tool's sign stays up into the thinking after it.
-    static let lingerSeconds: Double = 1.5
+    /// Tools the den reads as `.read` that look for things rather than read
+    /// one: the pet digs for them instead of opening a book.
+    static let searchTools: Set<String> = [
+        "grep", "glob", "ls", "search", "codebase_search", "find", "list_dir", "list_directory", "searching",
+    ]
+
+    /// What its pet acts out beside the notch; nil unless it is working.
+    /// Thinking between tools is the firefly; compacting, the bundle.
+    static func work(of session: SessionSnapshot) -> PetWork? {
+        switch session.status {
+        case .running, .processing:
+            // PreCompact: Codex names it as its tool, Claude only says so.
+            if session.currentTool?.lowercased() == "compacting"
+                || session.toolDescription?.hasPrefix("Compacting context") == true {
+                return .compact
+            }
+            guard session.status == .running else { return .think }
+            return work(tool: session.currentTool) ?? .think
+        case .idle, .waitingApproval, .waitingQuestion:
+            return nil
+        }
+    }
+
+    /// A tool's craft: its den sign's, with looking for things (digging)
+    /// told apart from reading (a book). Nil for no tool or a progress label.
+    static func work(tool raw: String?) -> PetWork? {
+        guard let sign = tool(raw) else { return nil }
+        switch sign {
+        case .shell: return .shell
+        case .edit: return .edit
+        case .read: return name(raw).map(searchTools.contains) == true ? .search : .read
+        case .web: return .web
+        case .agent: return .agent
+        case .other: return .other
+        case .thinking: return .think
+        }
+    }
+
+    /// How long a tool's craft stays up into the thinking after it.
+    static let lingerSeconds: Double = 2.0
+    /// Any craft plays at least this long before the next one, so a burst
+    /// of quick tools reads as a few motions, not a flicker (design/v25:
+    /// real turns change tool every 1.7s on average). A status change — a
+    /// question, an approval, the turn ending — still cuts in at once.
+    static let minHoldSeconds: Double = 2.5
 }
 
 /// One pet in the burrow: one per agent, however many conversations it has
@@ -170,7 +221,7 @@ struct BurrowPeekPet: Identifiable, Equatable {
     let reactionSessionId: String?
     /// A conversation with an approval waiting: a click on the lit pet opens it.
     let waitingSessionId: String?
-    /// What the conversation it shows is working on, above its laptop.
+    /// What the conversation it shows is working on, as the den's row sign.
     let sign: PetSign?
     /// A conversation with a question waiting: a click on the lit pet opens it.
     var questionSessionId: String? = nil
@@ -186,6 +237,8 @@ struct BurrowPeekPet: Identifiable, Equatable {
     var quotaLabel: String? = nil
     /// Antigravity's groups, listed in the den under its conversations.
     var quotaGroups: [WeeklyQuota.Group] = []
+    /// The craft it acts out beside the notch while it works.
+    var work: PetWork? = nil
 }
 
 /// Who is in the burrow right now: one pet per agent.
@@ -261,7 +314,8 @@ enum BurrowResidents {
                 },
                 quota: appState.quotaRemaining[group.agent],
                 quotaLabel: appState.quotaLabel[group.agent],
-                quotaGroups: appState.quotaGroups[group.agent] ?? []
+                quotaGroups: appState.quotaGroups[group.agent] ?? [],
+                work: shown.flatMap { BurrowPetSign.work(of: $0.1) }
             )
         }
     }
@@ -481,22 +535,39 @@ struct BurrowLip: View {
     }
 }
 
-/// A pet beside the notch with its sign. A tool's sign stays up through
-/// the moment of thinking before the next tool instead of flickering.
+/// A pet beside the notch at its craft. A tool's craft stays up through the
+/// moment of thinking after it, and every craft plays a while before the
+/// next, instead of flickering; each one starts from its beginning.
 private struct BurrowLipPet: View {
     let pet: BurrowPeekPet
-    @State private var held: PetSign?
+    @State private var held: PetWork?
+    @State private var heldSince: Date?
 
     var body: some View {
         MascotView(source: pet.source, status: pet.status, size: Burrow.petSize,
                    sessionId: pet.reactionSessionId,
-                   sign: pet.sign == nil ? nil : (held ?? pet.sign))
-            .task(id: pet.sign) {
-                if PetSign.lingers(from: held, to: pet.sign) {
-                    try? await Task.sleep(for: .seconds(BurrowPetSign.lingerSeconds))
+                   work: pet.work == nil ? nil : (held ?? pet.work),
+                   workStart: pet.work == nil ? nil : heldSince)
+            .task(id: pet.work) {
+                guard let next = pet.work else {
+                    held = nil
+                    heldSince = nil
+                    return
+                }
+                guard next != held else { return }
+                var wait: Double = 0
+                if held != nil, let since = heldSince {
+                    wait = BurrowPetSign.minHoldSeconds - Date().timeIntervalSince(since)
+                }
+                if PetWork.lingers(from: held, to: next) {
+                    wait = max(wait, BurrowPetSign.lingerSeconds)
+                }
+                if wait > 0 {
+                    try? await Task.sleep(for: .seconds(wait))
                     guard !Task.isCancelled else { return }
                 }
-                held = pet.sign
+                held = next
+                heldSince = Date()
             }
     }
 }
@@ -610,8 +681,8 @@ struct BurrowEmber: View {
         session.lastTurnFailed && session.status == .idle && session.lastActivity > denSeenAt
     }
 
-    /// Only a resting pet wears it: one at work shows its sign there, one
-    /// that needs you its "!", and a reaction plays out first.
+    /// Only a resting pet wears it: one at work has its craft there, one
+    /// that needs you its "!" or "?", and a reaction plays out first.
     static func shows(on state: PetState) -> Bool { state == .idle || state == .sleep }
 
     var body: some View {

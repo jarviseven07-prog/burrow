@@ -8,14 +8,16 @@ public enum DangerousCommand {
         /// `rm` with both recursive and force flags.
         case remove
         case sudo
-        /// `git push --force` / `-f` (not `--force-with-lease`).
+        /// `git push --force` / `-f` / `-fu` / `+branch` (not `--force-with-lease`).
         case forcePush
         case resetHard
-        /// `git clean -f…`
+        /// `git clean -f…` / `--force`
         case clean
         /// SQL `DROP TABLE / DATABASE / SCHEMA`.
         case drop
         case chmodOpen
+        /// `find … -delete`: deletes everything it finds, no Trash.
+        case findDelete
     }
 
     public struct Match: Equatable, Sendable {
@@ -61,12 +63,14 @@ public enum DangerousCommand {
         // The third value is the group that gets marked; `remove` checks its flags in group 1.
         (.remove, #"\brm((?:\s+-{1,2}[A-Za-z-]+)+)"#, 0),
         (.sudo, #"\bsudo\b"#, 0),
-        (.forcePush, git + #"push\b[^;&|\n]*?(--force\b(?!-with-lease)|(?<=\s)-f\b)"#, 1),
+        // --force, -f alone or with other short flags (-fu), or a +refspec.
+        (.forcePush, git + #"push\b[^;&|\n]*?(--force\b(?!-with-lease)|(?<=\s)-[A-Za-z]*f[A-Za-z]*\b|(?<=\s)\+[^\s;&|]+)"#, 1),
         // Just the subcommand is red, not a `-C dir` before it.
         (.resetHard, git + #"(reset\s+--hard)\b"#, 1),
-        (.clean, git + #"(clean\s+-[A-Za-z]*f[A-Za-z]*)"#, 1),
+        (.clean, git + #"(clean(?:\s+-[A-Za-z-]+)*?\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)\b)"#, 1),
         (.drop, #"(?i)\bdrop\s+(?:table|database|schema)\b"#, 0),
         (.chmodOpen, #"\bchmod\s+-R\s+777\b"#, 0),
+        (.findDelete, #"\bfind\b[^;&|\n]*?\s(-delete)\b"#, 1),
     ].map { kind, pattern, group in
         // The patterns are constants: a typo is a programming error.
         (kind, try! NSRegularExpression(pattern: pattern), group)

@@ -2,10 +2,12 @@
 //
 //   swiftc -O Sources/CodeIslandCore/PetFrame.swift Sources/CodeIslandCore/PetSprites.swift \
 //       scripts/pet_preview/main.swift -o .build/pet-preview
-//   .build/pet-preview design/v02/frames.json
+//   .build/pet-preview frames.json
 //
 // Runs the same checks as Tests/CodeIslandCoreTests/PetFrameTests.swift, then
-// exports every frame the app draws (0.1s steps over 9.6s) for the design page.
+// exports every frame the app draws for each of design/v25's motions (0.05s
+// steps over the motion's loop), so design/v25/候选/compare_swift.py can check
+// it pixel for pixel against the prototype's direction B.
 import Foundation
 
 var failures = 0
@@ -20,56 +22,54 @@ for species in PetSpecies.allCases {
         check(row.count == 16, "\(species) cols")
         for ch in row where ch != "." { check(s.palette[ch] != nil, "\(species) missing color \(ch)") }
     }
+    check(s.waist > s.eyeBottom && s.waist < s.bodyBottom, "\(species) waist \(s.waist) not under the face")
 }
 
-let step = 0.1, frameCount = 96
-var out: [String: Any] = [:]
-var palettes: [String: [String]] = [:]
+/// design/v25's motions: what the app shows and for how long it loops.
+let motions: [(key: String, state: PetState, work: PetWork?, loop: Double)] = [
+    ("sleep", .sleep, nil, 4.8), ("idle", .idle, nil, 12.0),
+    ("think", .busy, .think, 4.8), ("read", .busy, .read, 4.8), ("search", .busy, .search, 3.0),
+    ("edit", .busy, .edit, 4.2), ("shell", .busy, .shell, 3.6), ("web", .busy, .web, 4.8),
+    ("agent", .busy, .agent, 4.8), ("other", .busy, .other, 2.4), ("compact", .busy, .compact, 3.6),
+    ("approval", .attention, nil, 2.4), ("question", .question, nil, 4.8),
+    ("done", .celebrate, nil, 3.0), ("failed", .dizzy, nil, 4.0), ("heart", .heart, nil, 3.2),
+]
+let step = 0.05
+var out: [String: [String: [String]]] = [:]
 for species in PetSpecies.allCases {
-    var colors: [UInt32] = []
-    var states: [String: [String]] = [:]
-    for state in PetState.allCases {
+    var clips: [String: [String]] = [:]
+    for m in motions {
         var frames: [String] = []
-        for i in 0..<frameCount {
-            let px = PetFrame.pixels(sprite: species.sprite, state: state, t: Double(i) * step)
-            check(!px.isEmpty, "\(species) \(state) empty")
-            var grid = Array(repeating: Character("."), count: PetFrame.canvasWidth * PetFrame.canvasHeight)
+        for i in 0..<Int((m.loop / step).rounded()) {
+            let px = PetFrame.pixels(sprite: species.sprite, state: m.state, t: Double(i) * step, work: m.work)
+            check(!px.isEmpty, "\(species) \(m.key) empty")
+            var grid = Array(repeating: ".", count: PetFrame.canvasWidth * PetFrame.canvasHeight)
             for p in px {
                 check((0..<PetFrame.canvasWidth).contains(p.x) && (0..<PetFrame.canvasHeight).contains(p.y), "out of canvas")
-                var idx = colors.firstIndex(of: p.rgb)
-                if idx == nil { colors.append(p.rgb); idx = colors.count - 1 }
-                let code = Array("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")[idx!]
-                grid[p.y * PetFrame.canvasWidth + p.x] = code
+                grid[p.y * PetFrame.canvasWidth + p.x] = String(format: "%06X", p.rgb)
             }
-            frames.append(String(grid))
+            frames.append(grid.joined(separator: ","))
         }
-        check(Set(frames).count > 1, "\(species) \(state) never moves")
-        states[state.rawValue] = frames
+        check(Set(frames).count > 1, "\(species) \(m.key) never moves")
+        clips[m.key] = frames
     }
-    palettes[species.rawValue] = colors.map { String(format: "#%06X", $0) }
-    out[species.rawValue] = ["name": species.displayName, "states": states]
+    out[species.rawValue] = clips
 }
 
 // Eye checks on Clawd (when this sprite set has it): eyes at canvas x 6/13, rows 10-11.
 if let clawd = PetSpecies(rawValue: "clawd") {
-    func eyeRows(_ state: PetState) -> Set<Int> {
-        Set(PetFrame.pixels(sprite: clawd.sprite, state: state, t: 0)
+    func eyeRows(_ state: PetState, _ t: Double = 0) -> Set<Int> {
+        Set(PetFrame.pixels(sprite: clawd.sprite, state: state, t: t)
             .filter { $0.rgb == 0x000000 && [6, 13].contains($0.x) }.map(\.y))
     }
     check(eyeRows(.idle) == [10, 11], "idle eyes \(eyeRows(.idle))")
-    check(eyeRows(.sleep) == [11], "sleep eyes \(eyeRows(.sleep))")
+    // Asleep the top half sinks a row on the out-breath.
+    check(eyeRows(.sleep) == [12], "sleep eyes \(eyeRows(.sleep))")
+    check(eyeRows(.sleep, 1.3) == [11], "sleep eyes in-breath \(eyeRows(.sleep, 1.3))")
     check(eyeRows(.heart) == [10], "heart eyes \(eyeRows(.heart))")
 }
 
-let doc: [String: Any] = [
-    "canvas": [PetFrame.canvasWidth, PetFrame.canvasHeight],
-    "origin": [PetFrame.originX, PetFrame.originY],
-    "step": step,
-    "species": out,
-    "order": PetSpecies.allCases.map(\.rawValue),
-    "palettes": palettes,
-    "sources": PetSpecies.bySource.mapValues(\.rawValue),
-]
+let doc: [String: Any] = ["step": step, "clips": out]
 if CommandLine.arguments.count > 1 {
     let data = try JSONSerialization.data(withJSONObject: doc, options: [.sortedKeys])
     try data.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))

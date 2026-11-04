@@ -86,10 +86,10 @@ final class BurrowReviewFixTests: XCTestCase {
     // MARK: - Review #5: waiting on you outranks a passing reaction
 
     func testWaitingPetIsLitEvenWhileAReactionPlays() {
-        for status in [MascotAgentStatus.waitingApproval, .waitingQuestion] {
+        for (status, waiting) in [(MascotAgentStatus.waitingApproval, PetState.attention), (.waitingQuestion, .question)] {
             for reaction in [PetState.heart, .celebrate, .dizzy] {
                 let state = MascotView.petState(status: status, reaction: reaction, animating: true)
-                XCTAssertEqual(state, .attention, "\(status) under \(reaction)")
+                XCTAssertEqual(state, waiting, "\(status) under \(reaction)")
                 XCTAssertTrue(BurrowLipMetrics.isLit(state))
             }
         }

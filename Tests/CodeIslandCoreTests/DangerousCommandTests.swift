@@ -51,6 +51,26 @@ final class DangerousCommandTests: XCTestCase {
         XCTAssertEqual(kinds("git -C x status"), [])
     }
 
+    /// Health check 2026-11-04 #10: spellings the marks used to miss.
+    func testOtherSpellingsOfTheSameDanger() {
+        XCTAssertEqual(marked("git push -fu origin main"), ["-fu"])
+        XCTAssertEqual(marked("git push -uf origin main"), ["-uf"])
+        XCTAssertEqual(marked("git push origin +main"), ["+main"])
+        XCTAssertEqual(marked("git push origin +HEAD:main"), ["+HEAD:main"])
+        XCTAssertEqual(kinds("git clean --force -d"), [.clean])
+        XCTAssertEqual(marked("git clean -d --force"), ["clean -d --force"])
+        XCTAssertEqual(marked("find ~/Developer -name '*.swift' -delete"), ["-delete"])
+        XCTAssertEqual(kinds("find . -name '*.log' -delete"), [.findDelete])
+    }
+
+    func testTheirLookalikesStayPlain() {
+        for command in ["git push -u origin main", "git push origin feature-f", "git push --follow-tags",
+                        "git push origin main:main", "git push --force-with-lease", "git clean --dry-run",
+                        "git clean -n -d", "find . -name '*-delete*'", "grep -r -- -delete src"] {
+            XCTAssertEqual(marked(command), [], command)
+        }
+    }
+
     func testSafeCommandsStayPlain() {
         for command in ["ls -la", "swift test --filter BurrowLip", "git status", "git push", "npm run build",
                         "grep -rf patterns.txt src", "rsync -a src dst"] {

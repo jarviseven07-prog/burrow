@@ -1,5 +1,4 @@
 import SwiftUI
-import ServiceManagement
 import CodeIslandCore
 
 /// The den's back (design/v21, Jarvis picked C): Burrow's settings. The gear
@@ -19,6 +18,8 @@ struct BurrowDenBack: View {
     /// What was last asked for, until the login item's real state (a slow
     /// system call, ~18 ms) arrives off the main thread.
     @State private var launchAtLogin = UserDefaults.standard.bool(forKey: SettingsManager.launchAtLoginWantedKey)
+    /// Counts the switch's flicks: only the latest one's outcome is shown.
+    @State private var loginRequest = 0
     @State private var connected: [String: Bool] = [:]
     @State private var recording: ShortcutAction?
     @State private var keyMonitor: Any?
@@ -88,7 +89,17 @@ struct BurrowDenBack: View {
                 row {
                     Text(l10n["burrow_back_login"]).font(Burrow.font(12.5, .semibold)).foregroundStyle(Burrow.ink)
                     Spacer(minLength: 0)
-                    BurrowSwitch(isOn: Binding(get: { launchAtLogin }, set: { launchAtLogin = $0; SettingsManager.shared.launchAtLogin = $0 }))
+                    BurrowSwitch(isOn: Binding(get: { launchAtLogin }, set: { on in
+                        launchAtLogin = on
+                        loginRequest += 1
+                        let request = loginRequest
+                        // Started here, not in the task: flicks are written down in order.
+                        let change = SettingsManager.applyLaunchAtLogin(on)
+                        Task {
+                            let enabled = await change.value
+                            if request == loginRequest { launchAtLogin = enabled }
+                        }
+                    }))
                 }
                 row {
                     HStack(spacing: 10) {
@@ -110,7 +121,11 @@ struct BurrowDenBack: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 12)
         .onAppear(perform: refresh)
-        .task { launchAtLogin = await Task.detached { SMAppService.mainApp.status == .enabled }.value }
+        .task {
+            let request = loginRequest
+            let enabled = await SettingsManager.launchAtLoginEnabled()
+            if request == loginRequest { launchAtLogin = enabled }
+        }
         .onDisappear(perform: stopRecording)
     }
 
@@ -246,6 +261,7 @@ struct BurrowDenBack: View {
     private func startRecording(_ action: ShortcutAction) {
         stopRecording()
         recording = action
+        AppDelegate.shared?.suspendGlobalShortcuts()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if event.keyCode == 53 { // Escape — cancel
                 stopRecording()
@@ -257,15 +273,18 @@ struct BurrowDenBack: View {
             if !action.isEnabled { action.setEnabled(true) }
             stopRecording()
             shortcutsVersion += 1
-            (NSApp.delegate as? AppDelegate)?.setupGlobalShortcut()
             return nil
         }
     }
 
+    /// Ends a recording (a key recorded, Escape, the back closing) and puts
+    /// Burrow's shortcuts back, with whatever was just recorded.
     private func stopRecording() {
+        guard recording != nil || keyMonitor != nil else { return }
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
         recording = nil
+        AppDelegate.shared?.setupGlobalShortcut()
     }
 }
 

@@ -170,38 +170,58 @@ final class AppStateToolUseCacheTests: XCTestCase {
         XCTAssertEqual(try behavior(keptResponse), "allow")
     }
 
-    // MARK: - issue #216: orphan permissions (no tool_use_id) auto-dismiss on terminal approval
+    // MARK: - issue #216: a request answered in the terminal leaves the queue
 
-    /// Repro for #216: a PermissionRequest carrying NO tool_use_id can never be
-    /// correlated by resolveToolUseIfCompleted, so approving in the terminal left
-    /// the card up until the user closed it manually. After the fix, a follow-up
-    /// same-session activity event resolves the orphan as approved-in-terminal.
-    func testOrphanPermissionResolvedByFollowUpActivity() async throws {
+    /// Repro for #216, with the payloads Claude Code really sends: its
+    /// PermissionRequest carries no tool_use_id (hooks docs: "like PreToolUse
+    /// hooks, but without tool_use_id"), so the request is matched back to its
+    /// own PreToolUse. Approving in the terminal, the tool runs and its own
+    /// PostToolUse takes the card down.
+    func testRequestAnsweredInTheTerminalLeavesWithItsOwnPostToolUse() async throws {
+        let appState = AppState()
+        let input: [String: Any] = ["command": "rm -rf build", "description": "Clean the build"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_rm", toolInput: input))
+        let request = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: input)
+
+        let responseTask = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.first?.toolUseId, "toolu_rm", "found through its own PreToolUse")
+
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_rm", toolInput: input))
+
+        _ = try await awaitValue(of: responseTask)
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    /// No PreToolUse to match (an agent that sends none, or none with an id):
+    /// only the request's own tool finishing — same name, same input — or the
+    /// turn ending counts as answered elsewhere, and Burrow then lets go with
+    /// no decision instead of saying yes for the user.
+    func testUnmatchedRequestLeavesOnlyWithItsOwnToolOrTheTurnsEnd() async throws {
         let appState = AppState()
         let orphan = try makeHookEvent(
-            name: "PermissionRequest",
-            sessionId: "s1",
-            toolName: "Bash",
-            toolUseId: nil,
+            name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil,
             toolInput: ["command": "echo hi"]
         )
-
         let responseTask = await startHookRequest { appState.handlePermissionRequest(orphan, continuation: $0) }
-        XCTAssertEqual(appState.permissionQueue.count, 1)
         XCTAssertNil(appState.permissionQueue.first?.toolUseId)
 
-        // Agent moved on (user approved in terminal) — a follow-up PostToolUse
-        // arrives for the same session with no correlatable tool_use_id.
-        appState.handleEvent(try makeHookEvent(
-            name: "PostToolUse",
-            sessionId: "s1",
-            toolName: "Bash",
-            toolUseId: nil
-        ))
+        // Another tool starting or finishing is not this request moving on.
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Grep", toolUseId: nil, toolInput: ["pattern": "x"]))
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Grep", toolUseId: nil, toolInput: ["pattern": "x"]))
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: ["command": "ls"]))
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertStillPending(responseTask)
 
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: ["command": "echo hi"]))
         let response = try await awaitValue(of: responseTask)
-        XCTAssertEqual(try behavior(response), "allow")
-        XCTAssertEqual(appState.permissionQueue.count, 0)
+        XCTAssertNil(try decisionBehavior(response), "let go without answering for the user")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+
+        let second = await startHookRequest { appState.handlePermissionRequest(orphan, continuation: $0) }
+        appState.handleEvent(try makeHookEvent(name: "Stop", sessionId: "s1", toolName: nil, toolUseId: nil))
+        let secondResponse = try await awaitValue(of: second)
+        XCTAssertNil(try decisionBehavior(secondResponse), "the turn is over")
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
     }
 
     /// A background agent working in the same session is not the user saying yes
@@ -222,13 +242,209 @@ final class AppStateToolUseCacheTests: XCTestCase {
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
             "agent_id": "bg-agent",
-            "tool_name": "Write",
+            "tool_name": "Bash",
+            "tool_input": ["command": "rm -rf build"],
         ]))
         XCTAssertEqual(appState.permissionQueue.count, 1, "still waiting for the user")
 
-        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: nil))
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: ["command": "rm -rf build"]))
         let response = try await awaitValue(of: responseTask)
-        XCTAssertEqual(try behavior(response), "allow", "the main thread itself moved on")
+        XCTAssertNil(try decisionBehavior(response), "the main thread itself moved on")
+    }
+
+    // MARK: - Health check 2026-11-04 #1: parallel tool calls
+
+    /// Claude calls a Read that needs approval and a Grep that does not in one
+    /// message. The Grep's hooks arriving while the Read waits used to approve
+    /// the Read for the user.
+    func testSiblingToolOfTheSameMessageDoesNotAnswerARequest() async throws {
+        let appState = AppState()
+        let readInput: [String: Any] = ["file_path": "/Users/me/.ssh/config"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Read", toolUseId: "toolu_read", toolInput: readInput))
+        let request = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "Read", toolUseId: nil, toolInput: readInput)
+        let responseTask = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Grep", toolUseId: "toolu_grep", toolInput: ["pattern": "Host"]))
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Grep", toolUseId: "toolu_grep", toolInput: ["pattern": "Host"]))
+
+        XCTAssertEqual(appState.permissionQueue.count, 1, "the Grep finishing is not an answer to the Read")
+        await assertStillPending(responseTask)
+
+        appState.denyPermission()
+        let responseTaskResponse = try await awaitValue(of: responseTask)
+        XCTAssertEqual(try behavior(responseTaskResponse), "deny")
+    }
+
+    /// Three WebFetches to new sites in one message, two of them waiting:
+    /// approving the first lets it run, and its PostToolUse must not take the
+    /// second with it.
+    func testOneParallelRequestsPostToolUseLeavesTheOtherWaiting() async throws {
+        let appState = AppState()
+        let a: [String: Any] = ["url": "https://a.example", "prompt": "read"]
+        let b: [String: Any] = ["url": "https://b.example", "prompt": "read"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "WebFetch", toolUseId: "toolu_a", toolInput: a))
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "WebFetch", toolUseId: "toolu_b", toolInput: b))
+        let requestA = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "WebFetch", toolUseId: nil, toolInput: a)
+        let requestB = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "WebFetch", toolUseId: nil, toolInput: b)
+        let taskA = await startHookRequest { appState.handlePermissionRequest(requestA, continuation: $0) }
+        let taskB = await startHookRequest { appState.handlePermissionRequest(requestB, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.map(\.toolUseId), ["toolu_a", "toolu_b"])
+
+        appState.approvePermission()
+        let taskAResponse = try await awaitValue(of: taskA)
+        XCTAssertEqual(try behavior(taskAResponse), "allow")
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "WebFetch", toolUseId: "toolu_a", toolInput: a))
+
+        XCTAssertEqual(appState.permissionQueue.map(\.toolUseId), ["toolu_b"])
+        await assertStillPending(taskB)
+        appState.denyPermission()
+        let taskBResponse = try await awaitValue(of: taskB)
+        XCTAssertEqual(try behavior(taskBResponse), "deny")
+    }
+
+    /// Codex's PermissionRequest adds `tool_input.description` (the approval
+    /// reason), which its PreToolUse does not have. It is still the same call.
+    func testCodexRequestMatchesItsPreToolUseDespiteTheApprovalReason() async throws {
+        let appState = AppState()
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "call_push", toolInput: ["command": "git push"]))
+        let request = try makeHookEvent(
+            name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil,
+            toolInput: ["command": "git push", "description": "Needs network access"]
+        )
+        let responseTask = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.first?.toolUseId, "call_push")
+
+        appState.denyPermission()
+        _ = try await awaitValue(of: responseTask)
+    }
+
+    /// Two identical calls in flight cannot be told apart, so neither request
+    /// is pinned to one, and one of them finishing answers neither.
+    func testIdenticalParallelCallsAreNotGuessedApart() async throws {
+        let appState = AppState()
+        let input: [String: Any] = ["command": "make test"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1", toolInput: input))
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_2", toolInput: input))
+        let request = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: input)
+        let first = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        let second = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.map(\.toolUseId), [nil, nil])
+
+        appState.approvePermission()
+        _ = try await awaitValue(of: first)
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1", toolInput: input))
+        XCTAssertEqual(appState.permissionQueue.count, 1, "the other identical call still waits for you")
+        await assertStillPending(second)
+
+        appState.denyPermission()
+        _ = try await awaitValue(of: second)
+    }
+
+    /// Two identical calls both answered in the terminal: each one's
+    /// PostToolUse takes one card down. A card beyond the identical calls
+    /// still in flight belongs to the call that just posted.
+    func testIdenticalCallsAnsweredInTheTerminalLeaveOneByOne() async throws {
+        let appState = AppState()
+        let input: [String: Any] = ["command": "make test"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1", toolInput: input))
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_2", toolInput: input))
+        let request = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: input)
+        let first = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        let second = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1", toolInput: input))
+        let firstResponse = try await awaitValue(of: first)
+        XCTAssertNil(try decisionBehavior(firstResponse), "let go, not answered for you")
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        await assertStillPending(second)
+
+        appState.handleEvent(try makeHookEvent(name: "PostToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_2", toolInput: input))
+        let secondResponse = try await awaitValue(of: second)
+        XCTAssertNil(try decisionBehavior(secondResponse))
+        XCTAssertTrue(appState.permissionQueue.isEmpty)
+    }
+
+    /// A call you deny never runs, so it never posts. Its PreToolUse must not
+    /// linger and make Claude's retry of the same command look ambiguous.
+    func testADeniedCallDoesNotBlurItsRetry() async throws {
+        let appState = AppState()
+        let input: [String: Any] = ["command": "rm -rf dist"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_1", toolInput: input))
+        let request = try makeHookEvent(name: "PermissionRequest", sessionId: "s1", toolName: "Bash", toolUseId: nil, toolInput: input)
+        let first = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        appState.denyPermission()
+        _ = try await awaitValue(of: first)
+
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "Bash", toolUseId: "toolu_2", toolInput: input))
+        let retry = await startHookRequest { appState.handlePermissionRequest(request, continuation: $0) }
+        XCTAssertEqual(appState.permissionQueue.first?.toolUseId, "toolu_2")
+
+        appState.denyPermission()
+        _ = try await awaitValue(of: retry)
+    }
+
+    // MARK: - Health check 2026-11-04 #2: OpenCode names the request it answered
+
+    /// OpenCode can hold two approvals in one conversation. Answering one in its
+    /// TUI (rejecting counts) used to send an id-less PostToolUse that let the
+    /// other through as "allow". Its reply now names the request, and only that
+    /// one is let go — with no decision, so the plugin replies nothing for it.
+    func testOpenCodeReplySettlesOnlyTheRequestItNames() async throws {
+        let appState = AppState()
+        let ls = try openCodeRequest("per_ls", tool: "Bash", input: ["command": "ls"])
+        let rm = try openCodeRequest("per_rm", tool: "Bash", input: ["command": "rm -rf dist"])
+        let lsTask = await startHookRequest { appState.handlePermissionRequest(ls, continuation: $0) }
+        let rmTask = await startHookRequest { appState.handlePermissionRequest(rm, continuation: $0) }
+
+        appState.handleEvent(try openCodeReply("per_ls"))
+
+        let lsTaskResponse = try await awaitValue(of: lsTask)
+        XCTAssertNil(try decisionBehavior(lsTaskResponse))
+        XCTAssertEqual(appState.permissionQueue.count, 1)
+        XCTAssertEqual(appState.permissionQueue.first?.event.rawJSON["_opencode_request_id"] as? String, "per_rm")
+        await assertStillPending(rmTask)
+
+        appState.handleEvent(try openCodeReply("per_other"))
+        XCTAssertEqual(appState.permissionQueue.count, 1, "a reply for a request Burrow does not hold changes nothing")
+
+        appState.denyPermission()
+        let rmTaskResponse = try await awaitValue(of: rmTask)
+        XCTAssertEqual(try behavior(rmTaskResponse), "deny")
+    }
+
+    /// The question side: `question.replied` for another request leaves an
+    /// OpenCode question card alone; its own reply takes it down.
+    func testOpenCodeReplySettlesOnlyTheQuestionItNames() async throws {
+        let appState = AppState()
+        let ask = try openCodeRequest(
+            "que_1", tool: "AskUserQuestion",
+            input: ["questions": [["question": "Which?", "options": [["label": "A"], ["label": "B"]]]]]
+        )
+        let askTask = await startHookRequest { appState.handleAskUserQuestion(ask, continuation: $0) }
+        XCTAssertEqual(appState.questionQueue.count, 1)
+
+        appState.handleEvent(try openCodeReply("per_other"))
+        XCTAssertEqual(appState.questionQueue.count, 1)
+        await assertStillPending(askTask)
+
+        appState.handleEvent(try openCodeReply("que_1"))
+        let askTaskResponse = try await awaitValue(of: askTask)
+        XCTAssertNil(try decisionBehavior(askTaskResponse))
+        XCTAssertTrue(appState.questionQueue.isEmpty)
+    }
+
+    private func openCodeRequest(_ id: String, tool: String, input: [String: Any]) throws -> HookEvent {
+        try makeRawHookEvent([
+            "hook_event_name": "PermissionRequest", "session_id": "opencode-ses_1", "_source": "opencode",
+            "tool_name": tool, "tool_input": input, "_opencode_request_id": id,
+        ])
+    }
+
+    private func openCodeReply(_ id: String) throws -> HookEvent {
+        try makeRawHookEvent([
+            "hook_event_name": "PostToolUse", "session_id": "opencode-ses_1", "_source": "opencode",
+            "_opencode_request_id": id,
+        ])
     }
 
     /// Guard for #147 inside the #216 fix: an orphan-drain triggered by a follow-up
@@ -295,30 +511,35 @@ final class AppStateToolUseCacheTests: XCTestCase {
     }
 
     /// Repro for #147 with parallel tools: Notion / MCP plugin invokes two
-    /// fetches at once. The first PostToolUse arrives (its PreToolUse was never
-    /// cached, so `resolveToolUseIfCompleted` finds nothing to drain) while the
-    /// second tool's PermissionRequest is still pending. Pre-fix, the blanket
-    /// drain would deny the pending second request; the UI flashed a card and
-    /// users saw "denied by PermissionRequest hook" before they could react.
+    /// fetches at once. Tool A finishes while tool B's PermissionRequest is
+    /// still pending. Pre-fix, the blanket drain denied B; the UI flashed a card
+    /// and users saw "denied by PermissionRequest hook" before they could react.
+    /// The request is built the way Claude Code sends it — no tool_use_id — and
+    /// finds B's id through B's PreToolUse.
     func testParallelPostToolUseDoesNotDenyUnrelatedPendingPermission() async throws {
         let appState = AppState()
-        let pendingForToolB = try makePermissionEvent(
+        let fetchA: [String: Any] = ["id": "page-a"]
+        let fetchB: [String: Any] = ["id": "page-b"]
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "mcp__notion__notion-fetch", toolUseId: "toolu_A", toolInput: fetchA))
+        appState.handleEvent(try makeHookEvent(name: "PreToolUse", sessionId: "s1", toolName: "mcp__notion__notion-fetch", toolUseId: "toolu_B", toolInput: fetchB))
+        let pendingForToolB = try makeHookEvent(
+            name: "PermissionRequest",
             sessionId: "s1",
             toolName: "mcp__notion__notion-fetch",
-            toolUseId: "toolu_B"
+            toolUseId: nil,
+            toolInput: fetchB
         )
 
         let responseTask = await startHookRequest { appState.handlePermissionRequest(pendingForToolB, continuation: $0) }
         XCTAssertEqual(appState.permissionQueue.count, 1)
 
-        // Tool A finishes — PostToolUse arrives with a tool_use_id that was
-        // never in the queue (and never cached, since we skipped its PreToolUse
-        // for this scenario). resolveToolUseIfCompleted removes nothing.
+        // Tool A finishes.
         appState.handleEvent(try makeHookEvent(
             name: "PostToolUse",
             sessionId: "s1",
             toolName: "mcp__notion__notion-fetch",
-            toolUseId: "toolu_A"
+            toolUseId: "toolu_A",
+            toolInput: fetchA
         ))
 
         XCTAssertEqual(appState.permissionQueue.count, 1,
@@ -484,6 +705,14 @@ final class AppStateToolUseCacheTests: XCTestCase {
             throw NSError(domain: "AppStateToolUseCacheTests", code: 1)
         }
         return event
+    }
+
+    /// The decision's behavior, or nil when Burrow let go without one.
+    private func decisionBehavior(_ data: Data) throws -> String? {
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let hookSpecific = json["hookSpecificOutput"] as? [String: Any]
+        let decision = hookSpecific?["decision"] as? [String: Any]
+        return decision?["behavior"] as? String
     }
 
     private func behavior(_ data: Data) throws -> String {

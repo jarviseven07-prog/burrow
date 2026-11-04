@@ -96,11 +96,12 @@ final class L10n: ObservableObject {
         "burrow_time_ago": "%@ ago",
         "danger_remove": "rm -rf deletes these right away — they don't go to the Trash.",
         "danger_sudo": "sudo runs this as an administrator.",
-        "danger_forcePush": "--force overwrites the commits on the remote.",
+        "danger_forcePush": "A force push overwrites the commits on the remote.",
         "danger_resetHard": "reset --hard throws away changes you haven't committed.",
         "danger_clean": "git clean -f deletes untracked files for good.",
         "danger_drop": "DROP deletes a whole table or database.",
         "danger_chmodOpen": "chmod -R 777 lets anyone change these files.",
+        "danger_findDelete": "find -delete deletes everything it finds — nothing goes to the Trash.",
 
         // Menu
         "settings_ellipsis": "Settings...",
@@ -206,11 +207,12 @@ final class L10n: ObservableObject {
         "burrow_time_ago": "%@前",
         "danger_remove": "rm -rf 会直接删掉，不经过废纸篓。",
         "danger_sudo": "sudo 会用管理员权限运行。",
-        "danger_forcePush": "--force 会覆盖远端的提交。",
+        "danger_forcePush": "强推会覆盖远端的提交。",
         "danger_resetHard": "reset --hard 会丢掉还没提交的改动。",
         "danger_clean": "git clean -f 会删掉没纳入 git 的文件，找不回来。",
         "danger_drop": "DROP 会删掉整张表或整个数据库。",
         "danger_chmodOpen": "chmod -R 777 会让谁都能改这些文件。",
+        "danger_findDelete": "find -delete 会把找到的全删掉，不经过废纸篓。",
 
         // Menu
         "settings_ellipsis": "设置...",

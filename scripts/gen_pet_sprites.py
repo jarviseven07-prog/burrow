@@ -45,7 +45,9 @@ def main() -> None:
         lines.append(f"                {rows}")
         face = sp.get("face")
         face_arg = f', screenFace: PetScreenFace(x: {face["x"]}, y: {face["y"]})' if face else ""
-        lines.append(f'            ], palette: [{pal}], eyeBackground: "{sp["eyeBg"]}"{face_arg})')
+        waist = sp["waist"]
+        assert 0 <= waist < 16 and grid[waist].strip("."), (key, "waist must be a row of the body")
+        lines.append(f'            ], palette: [{pal}], eyeBackground: "{sp["eyeBg"]}"{face_arg}, waist: {waist})')
     lines += ["        }", "    }", ""]
 
     lines.append("    /// Which pet each agent source gets.")
