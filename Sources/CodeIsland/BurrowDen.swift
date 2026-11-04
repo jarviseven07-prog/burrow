@@ -534,9 +534,10 @@ struct BurrowSessionRow: View {
     }
 }
 
-/// The small sign at the start of a den row — the same pixels a pet shows
-/// above its laptop beside the notch, so the den and the notch say "running
-/// a command" the same way. A row that needs you has a small lamp, one that
+/// The small sign at the start of a den row says what the conversation is
+/// doing (running a command, editing, reading…). Since design/v25 the pet
+/// beside the notch acts its work out as a burrow craft instead; the den row
+/// keeps the sign. A row that needs you has a small lamp, one that
 /// failed an ember, one that finished since you last looked a spark; a
 /// resting row has nothing.
 struct BurrowRowSign: View {

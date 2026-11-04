@@ -644,7 +644,8 @@ extension View {
 /// green while healthy, orange when short, red under 15% (design/v24 D).
 struct BurrowHealthBar: View {
     let remaining: Double
-    /// From the pet's left edge to its laptop's right.
+    /// From the pet's left edge past its right (sized when a laptop stood
+    /// beside the pet; kept since design/v25).
     static let cells = 18
     static let rows = 2
 
